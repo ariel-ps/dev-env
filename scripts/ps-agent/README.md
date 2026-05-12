@@ -11,6 +11,7 @@ picks up every helper in this folder. Open a new shell to refresh.
 |---|---|
 | `pa.sh` | `pa` — drive the local agent (start/stop/logs/edit config) |
 | `pa-api.sh` | `pa-api` — call the tenant API the agent itself uses |
+| `reset-plist.sh` | `reset-plist` — wipe Safari extension plists (user + MDM) |
 | `bin/check-domain-in-genai-list.sh` | Standalone GenAI domain checker; on PATH after load |
 
 ## `pa` — local agent control
@@ -78,6 +79,22 @@ eval "$(pa-api env)"
 curl -fsS "https://$PROMPT_API_DOMAIN/api/protect-native-apps/get_apps" \
   -H "app-id: $PROMPT_API_KEY" | jq 'to_entries[:5]'
 ```
+
+## `reset-plist` — Safari extension plist reset
+
+Used when debugging the Safari extension's hidden API-key inputs / cached
+configuration. Wipes the user-side preference plists and (optionally) the
+MDM-pushed one so the extension boots fresh.
+
+```
+reset-plist user     delete user prefs + MDM plist (default)
+reset-plist mdm-off  move MDM plist → /tmp backup (re-pushed by JumpCloud later)
+reset-plist mdm-on   restore the MDM plist from /tmp backup
+reset-plist all      user + mdm-off
+reset-plist status   show which plists currently exist
+```
+
+Quit Safari fully (⌘Q) after wiping for the change to take effect.
 
 ## `bin/check-domain-in-genai-list.sh`
 
