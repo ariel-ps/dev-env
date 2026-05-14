@@ -43,6 +43,7 @@ pa-api whoami                show resolved domain + masked app-id + source
 pa-api env                   eval-friendly export lines for PROMPT_API_*
 pa-api get-apps              GET /api/protect-native-apps/get_apps
 pa-api get-secrets [domain]  GET /api/protect-native-apps/get_secrets_policy
+pa-api get-policy <url> [email]  POST /api/employee/evaluate-rule (per-domain policy)
 pa-api heartbeat             POST /api/protect-native-apps/heartbeat
 pa-api apps-summary          histogram of apps (count → name)
 pa-api apps-by-name <app>    URL patterns mapped to a given app
@@ -67,6 +68,10 @@ pa-api apps-by-name "GitHub Copilot"
 
 # Find which app the agent would classify a URL as
 pa-api match https://api.githubcopilot.com/chat/completions
+
+# Fetch the rulebase-v2 policy for a URL (action / popup / regexPolicy / etc.)
+pa-api get-policy https://chat.openai.com/backend-api/conversation
+pa-api get-policy https://claude.ai/api/organizations/x/chat_conversations alice@acme.com
 
 # Hit any other tenant endpoint (passes through to curl)
 pa-api curl /api/protect-native-apps/heartbeat -X POST -d '{"configTimestamps":{}}'

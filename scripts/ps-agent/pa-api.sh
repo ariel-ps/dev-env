@@ -9,6 +9,7 @@
 #   pa-api whoami                       # show resolved domain + masked app-id
 #   pa-api get-apps                     # GET /api/protect-native-apps/get_apps
 #   pa-api get-secrets [domain]         # GET /api/protect-native-apps/get_secrets_policy
+#   pa-api get-policy <url> [email]     # POST /api/employee/evaluate-rule (per-domain rulebase-v2 policy)
 #   pa-api heartbeat                    # POST /api/protect-native-apps/heartbeat
 #   pa-api apps-summary                 # histogram of apps in get_apps
 #   pa-api apps-by-name <app>           # list URL patterns for one app
@@ -126,6 +127,30 @@ pa-api() {
         -X POST -d '{"configTimestamps":{}}' | _pa_api_format
       ;;
 
+    get-policy)
+      # POST /api/employee/evaluate-rule — mirrors fetch_domain_policy() in
+      # src/proxy/proxy_addon.py:459. Returns the rulebase-v2 per-domain policy
+      # the agent caches via cache_domain_policy() (ruleInfo / policyInfo / popup).
+      [[ -z "${1:-}" ]] && { echo "usage: pa-api get-policy <url> [email]" >&2; return 1; }
+      local url="$1"
+      local email="${2:-${PROMPT_USER_EMAIL:-${USER}}}"
+      local sensor_data
+      sensor_data=$(jq -n \
+        --arg os       "$(uname -s)" \
+        --arg osv      "$(uname -v)" \
+        --arg machine  "$(hostname -s)" \
+        --arg version  "${PROMPT_AGENT_VERSION:-dev}" \
+        '{version:$version, os:$os, os_version:$osv, machine:$machine}')
+      local body
+      body=$(jq -n \
+        --arg email "$email" \
+        --arg url   "$url" \
+        --argjson sensor "$sensor_data" \
+        '{userInfo:{email:$email}, sensorData:$sensor, requestUrl:$url}')
+      _pa_api_curl "/api/employee/evaluate-rule" \
+        -X POST -d "$body" | _pa_api_format
+      ;;
+
     apps-summary)
       _pa_api_curl "/api/protect-native-apps/get_apps" \
         | jq -r 'to_entries | group_by(.value) | map({app: .[0].value, count: length}) | sort_by(-.count) | .[] | "\(.count)\t\(.app)"' \
@@ -174,6 +199,7 @@ pa-api — tenant API helpers (uses agent's domain + app-id)
   env                     print export lines for PROMPT_API_* (eval-friendly)
   get-apps                GET /api/protect-native-apps/get_apps  (INSPECT_URLS_MAP)
   get-secrets [domain]    GET /api/protect-native-apps/get_secrets_policy
+  get-policy <url> [email]  POST /api/employee/evaluate-rule (per-domain policy)
   heartbeat               POST /api/protect-native-apps/heartbeat
   apps-summary            histogram of apps in get_apps
   apps-by-name <app>      URL patterns mapped to a given app
@@ -193,7 +219,7 @@ EOF
 }
 
 _pa_api() {
-  compadd whoami env get-apps get-secrets heartbeat \
+  compadd whoami env get-apps get-secrets get-policy heartbeat \
           apps-summary apps-by-name match genai-check curl help
 }
 compdef _pa_api pa-api
