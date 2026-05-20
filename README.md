@@ -46,6 +46,7 @@ done
 | Profile | Docs | Provides |
 |---|---|---|
 | `ps-agent` | [scripts/ps-agent/README.md](scripts/ps-agent/README.md) | `pa` (local agent control), `pa-api` (tenant API), `check-domain-in-genai-list.sh` |
+| `k8s` | — | `kubectl` aliases: `k`, `kpod`, `ksvc`, `ksts`, `kdep`, `kns`, `klogf`, `kexec`, … |
 
 ## Adding a new profile
 

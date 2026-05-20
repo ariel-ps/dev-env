@@ -169,7 +169,7 @@ pa-api() {
       _pa_api_curl "/api/protect-native-apps/get_apps" \
         | jq -r --arg url "$url" '
             to_entries
-            | (map(select(.key == $url)) + map(select(.key != $url and ($url | test(.key)))))
+            | (map(select(.key == $url)) + map(select(.key != $url and (.key as $re | $url | test($re)))))
             | .[0] // empty
             | "\(.value)\t\(.key)"' \
         | { read -r line; if [[ -n "$line" ]]; then
@@ -177,6 +177,74 @@ pa-api() {
             else
               echo "no match — should_inspect_app($url) would return None" >&2; return 3
             fi; }
+      ;;
+
+    check)
+      # Composite read-only report: classification (get_apps) + per-domain
+      # policy (evaluate-rule). Combines `match` + `get-policy` into the
+      # four fields that actually decide what the agent will do — app,
+      # action, logAction, inspectionMode — and flags the evaluate-rule=null
+      # case where handle_domain_policy short-circuits before ps_protect_api
+      # runs (see src/proxy/proxy_addon.py:483 in ps-agent).
+      [[ -z "${1:-}" ]] && { echo "usage: pa-api check <url> [email]" >&2; return 1; }
+      local url="$1"
+      local email="${2:-${PROMPT_USER_EMAIL:-${USER}}}"
+
+      local match_line
+      match_line=$(_pa_api_curl "/api/protect-native-apps/get_apps" \
+        | jq -r --arg url "$url" '
+            to_entries
+            | (map(select(.key == $url)) + map(select(.key != $url and (.key as $re | $url | test($re)))))
+            | .[0] // empty
+            | "\(.value)\t\(.key)"')
+
+      local app regex
+      if [[ -n "$match_line" ]]; then
+        app="${match_line%%	*}"; regex="${match_line#*	}"
+      else
+        app="(no match)"; regex="—"
+      fi
+
+      local sensor_data body policy
+      sensor_data=$(jq -n \
+        --arg os       "$(uname -s)" \
+        --arg osv      "$(uname -v)" \
+        --arg machine  "$(hostname -s)" \
+        --arg version  "${PROMPT_AGENT_VERSION:-dev}" \
+        '{version:$version, os:$os, os_version:$osv, machine:$machine}')
+      body=$(jq -n \
+        --arg email "$email" \
+        --arg url   "$url" \
+        --argjson sensor "$sensor_data" \
+        '{userInfo:{email:$email}, sensorData:$sensor, requestUrl:$url}')
+      policy=$(_pa_api_curl "/api/employee/evaluate-rule" -X POST -d "$body")
+
+      local action lvo mode pid note
+      if [[ -z "$policy" || "$policy" == "null" ]]; then
+        action="(null)"; lvo=""; mode="—"; pid="—"
+        note="evaluate-rule returned null → agent will drop the request (handle_domain_policy returns True before ps_protect_api runs)"
+      else
+        action=$(printf '%s' "$policy" | jq -r '.ruleInfo.action // "—"')
+        lvo=$(printf '%s' "$policy" | jq -r '.ruleInfo.isLogViolationsOnly // false')
+        mode=$(printf '%s' "$policy" | jq -r '.policyInfo.inspectionMode // "—"')
+        pid=$(printf '%s' "$policy" | jq -r '.policyInfo.policyId // "—"')
+        note=""
+      fi
+
+      local log_action="—"
+      case "$lvo" in
+        true)  log_action="ViolationsOnly  (isLogViolationsOnly=true)" ;;
+        false) log_action="All             (isLogViolationsOnly=false)" ;;
+      esac
+
+      printf 'url       : %s\n' "$url"
+      printf 'app       : %s\n' "$app"
+      printf 'regex     : %s\n' "$regex"
+      printf 'action    : %s\n' "$action"
+      printf 'logAction : %s\n' "$log_action"
+      printf 'mode      : %s\n' "$mode"
+      printf 'policyId  : %s\n' "$pid"
+      [[ -n "$note" ]] && printf 'note      : %s\n' "$note"
       ;;
 
     genai-check)
@@ -204,6 +272,7 @@ pa-api — tenant API helpers (uses agent's domain + app-id)
   apps-summary            histogram of apps in get_apps
   apps-by-name <app>      URL patterns mapped to a given app
   match <url>             which app would should_inspect_app(url) return?
+  check <url> [email]     classification + per-domain rule (app/action/logAction/mode)
   genai-check <domain>... run bin/check-domain-in-genai-list.sh
   curl <path> [args...]   generic authed curl to https://\${domain}<path>
 
@@ -220,6 +289,6 @@ EOF
 
 _pa_api() {
   compadd whoami env get-apps get-secrets get-policy heartbeat \
-          apps-summary apps-by-name match genai-check curl help
+          apps-summary apps-by-name match check genai-check curl help
 }
 compdef _pa_api pa-api

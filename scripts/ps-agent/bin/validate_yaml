@@ -1,0 +1,40 @@
+#!/usr/bin/env -S uv run --script --quiet
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["pyyaml>=6"]
+# ///
+"""Validate a YAML file's formatting. Prints 'valid'/'non valid' then reason."""
+import argparse
+import sys
+
+import yaml
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate YAML file formatting.")
+    parser.add_argument("path", help="Path to the YAML file to validate")
+    args = parser.parse_args()
+
+    try:
+        with open(args.path, "r", encoding="utf-8") as f:
+            list(yaml.safe_load_all(f))
+    except FileNotFoundError:
+        print("non valid")
+        print(f"file not found: {args.path}")
+        return 1
+    except yaml.YAMLError as e:
+        print("non valid")
+        print(str(e).replace("\n", " "))
+        return 1
+    except OSError as e:
+        print("non valid")
+        print(f"could not read file: {e}")
+        return 1
+
+    print("valid")
+    print(f"parsed OK: {args.path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
