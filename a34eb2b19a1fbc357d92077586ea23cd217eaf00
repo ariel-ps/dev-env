@@ -1,0 +1,72 @@
+scripts/ps-agent/bin/validate_yaml
+  3c4fe2863a6b0db7 1-40
+scripts/ps-agent/pa-api.sh
+  72cdf7c524fd4cdd 172,182-249,275,292
+scripts/k8s/k.sh
+  3c4fe2863a6b0db7 40-45
+  1a61128e16825fd3 1-39
+README.md
+  1a61128e16825fd3 49
+scripts/ps-agent/argo.sh
+  b92b5b358e434341 19-32
+  3c4fe2863a6b0db7 1-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "a34eb2b19a1fbc357d92077586ea23cd217eaf00",
+  "prompts": {
+    "1a61128e16825fd3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9a3d1923-127e-4733-aa4f-2de2e166e435",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 40,
+      "total_deletions": 0,
+      "accepted_lines": 40,
+      "overriden_lines": 0
+    },
+    "3c4fe2863a6b0db7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d4aae0e9-ba3b-49e6-a45f-8b16709ad79a",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 65,
+      "total_deletions": 1,
+      "accepted_lines": 64,
+      "overriden_lines": 0
+    },
+    "72cdf7c524fd4cdd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "86278692-0bcd-4e22-a431-bc5814da4725",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 72,
+      "total_deletions": 3,
+      "accepted_lines": 71,
+      "overriden_lines": 0
+    },
+    "b92b5b358e434341": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a7e72950-7f47-4f8a-8df5-18459f3f1b17",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 14,
+      "total_deletions": 0,
+      "accepted_lines": 14,
+      "overriden_lines": 0
+    }
+  }
+}
