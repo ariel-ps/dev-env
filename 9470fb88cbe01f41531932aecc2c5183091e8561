@@ -1,0 +1,23 @@
+scripts/ps-agent/argo.sh
+  38038fc5ca54d411 33-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "9470fb88cbe01f41531932aecc2c5183091e8561",
+  "prompts": {
+    "38038fc5ca54d411": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6afe5d9d-b7fa-4739-8f7a-aafb37c29f4c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 39,
+      "total_deletions": 0,
+      "accepted_lines": 39,
+      "overriden_lines": 0
+    }
+  }
+}
