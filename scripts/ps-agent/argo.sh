@@ -30,3 +30,42 @@ argo_pip_login() {
   aws codeartifact login --tool pip --domain prompt-security \
     --repository pypi-proxy --region eu-north-1 --profile "$profile"
 }
+
+# Dispatch the ps-argocd-dev-envs "Create Environment" workflow.
+# usage: argo_create_env [ttl_hours] [prompt_version]
+argo_create_env() {
+  local ttl="${1:-8}"
+  local prompt_version="${2:-}"
+  gh workflow run create_env.yml \
+    -R prompt-security/ps-argocd-dev-envs \
+    --ref main \
+    -f ttl_hours="$ttl" \
+    -f instance_type=spot \
+    -f gpu=false \
+    -f prompt_version="$prompt_version" \
+    -f icap=false \
+    -f empty_env=false \
+    -f additional_setup=false \
+    -f shared_gpu=true \
+    && echo "[argo_create_env] dispatched (ttl=${ttl}h)"
+}
+
+# Dispatch the ps-argocd-dev-envs "Delete Environment" workflow.
+# usage: argo_delete_env [additional_setup=true|false]
+argo_delete_env() {
+  local additional="${1:-false}"
+  gh workflow run delete_env.yml \
+    -R prompt-security/ps-argocd-dev-envs \
+    --ref main \
+    -f additional_setup="$additional" \
+    && echo "[argo_delete_env] dispatched (additional_setup=${additional})"
+}
+
+# Show recent ps-argocd-dev-envs runs triggered by the authenticated user.
+# usage: argo_env_status [limit]
+argo_env_status() {
+  local limit="${1:-1}"
+  local me; me=$(gh api user --jq .login) || return 1
+  gh run list -R prompt-security/ps-argocd-dev-envs \
+    --user="$me" --limit "$limit"
+}
