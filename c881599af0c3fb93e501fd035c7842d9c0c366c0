@@ -1,0 +1,87 @@
+scripts/ps-platform/ps-build-images.sh
+  e6723c21250c6166 1-159
+scripts/ps-platform/README.md
+  e6723c21250c6166 1-52
+scripts/docker/hermes-webui.sh
+  1ac95fb0be48f6ff 14,18
+  abccd905813105ff 32-38,40-43,45-47
+README.md
+  c7b3d58b5fa36da4 50
+scripts/ps-agent/ps-known-site.sh
+  12a84cd67e7d67f2 1-35
+scripts/docker/openspec-ui.sh
+  1ac95fb0be48f6ff 15,19
+  c7b3d58b5fa36da4 1-14,16-18,20-115
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "c881599af0c3fb93e501fd035c7842d9c0c366c0",
+  "prompts": {
+    "12a84cd67e7d67f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cea28ce8-76d0-4716-be6b-de3db5c8652a",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 35,
+      "total_deletions": 0,
+      "accepted_lines": 35,
+      "overriden_lines": 0
+    },
+    "1ac95fb0be48f6ff": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e0c4fbe9-7a5f-4642-a397-f5255ca5ea10",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 2,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    },
+    "abccd905813105ff": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cb898a7a-face-462b-895d-c0e801b52d7c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 15,
+      "total_deletions": 5,
+      "accepted_lines": 14,
+      "overriden_lines": 0
+    },
+    "c7b3d58b5fa36da4": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8635ce22-04df-42e3-94e4-3b3c9fdab8b8",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 115,
+      "total_deletions": 0,
+      "accepted_lines": 114,
+      "overriden_lines": 0
+    },
+    "e6723c21250c6166": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "be87f1ce-3b4e-464c-b044-636393e622ba",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 241,
+      "total_deletions": 30,
+      "accepted_lines": 211,
+      "overriden_lines": 0
+    }
+  }
+}
