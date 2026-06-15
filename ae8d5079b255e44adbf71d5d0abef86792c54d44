@@ -1,0 +1,23 @@
+scripts/k8s/k.sh
+  d22d9181a883b01c 41-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "ae8d5079b255e44adbf71d5d0abef86792c54d44",
+  "prompts": {
+    "d22d9181a883b01c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cc4da90c-aef5-42c2-9b20-46f9522ecc2d",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 4,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    }
+  }
+}
