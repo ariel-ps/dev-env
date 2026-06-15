@@ -38,8 +38,12 @@ alias kapp='kubectl apply -f'
 alias kdel='kubectl delete'
 alias kctx='kubectl config current-context'
 
-# Connect to prompt-dev EKS and pin namespace to dev-ariel-ps
-k_content() {
-  aws eks update-kubeconfig --name prompt-dev --region eu-north-1 || return 1
-  kubectl config set-context --current --namespace=dev-ariel-ps
+# Connect to an EKS cluster and optionally pin a namespace.
+# usage: k_connect <cluster-name> <region> [namespace]
+k_connect() {
+  local cluster="${1:?usage: k_connect <cluster-name> <region> [namespace]}"
+  local region="${2:?usage: k_connect <cluster-name> <region> [namespace]}"
+  local ns="${3:-}"
+  aws eks update-kubeconfig --name "$cluster" --region "$region" || return 1
+  [[ -n "$ns" ]] && kubectl config set-context --current --namespace="$ns"
 }
