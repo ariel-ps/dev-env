@@ -1,0 +1,40 @@
+scripts/utils/mitm-to-jsonl.sh
+  66146dca27771e43 1-42
+scripts/utils/detect-msg-format.sh
+  66146dca27771e43 1-24
+scripts/utils/mitm_to_jsonl.py
+  66146dca27771e43 1-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "f503c318f7e10604863cbd75b416bb12098c7498",
+  "prompts": {
+    "66146dca27771e43": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0eea10df-51da-4359-840d-797158d8d0d1",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 371,
+      "total_deletions": 0,
+      "accepted_lines": 371,
+      "overriden_lines": 0
+    },
+    "984738ab55489b61": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "34942def-d88c-46ae-8b05-f906298497d0",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 742,
+      "total_deletions": 0,
+      "accepted_lines": 742,
+      "overriden_lines": 0
+    }
+  }
+}
