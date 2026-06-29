@@ -15,6 +15,8 @@
 #   pa-api apps-by-name <app>           # list URL patterns for one app
 #   pa-api match <url>                  # which app would the agent classify a URL as?
 #   pa-api genai-check <domain>...      # run the bin/check-domain-in-genai-list.sh helper
+#   pa-api verify-maintenance-token <token>
+#                                        # decode + verify a maintenance token
 #   pa-api curl <path> [curl args...]   # authed curl to https://${domain}<path>
 #   pa-api env                          # print export lines for PROMPT_API_DOMAIN / PROMPT_API_KEY
 #
@@ -254,6 +256,13 @@ pa-api() {
         "$_PA_API_DIR/bin/check-domain-in-genai-list.sh" "$@"
       ;;
 
+    verify-maintenance-token)
+      [[ -z "${1:-}" ]] && { echo "usage: pa-api verify-maintenance-token <token>" >&2; return 1; }
+      _pa_api_load_creds || { echo "pa-api: no credentials found" >&2; return 2; }
+      PROMPT_API_DOMAIN="$PA_API_DOMAIN" PROMPT_API_KEY="$PA_API_KEY" \
+        "$_PA_API_DIR/bin/verify-maintenance-token.sh" "$@"
+      ;;
+
     curl)
       [[ -z "${1:-}" ]] && { echo "usage: pa-api curl <path> [curl-args...]" >&2; return 1; }
       _pa_api_curl "$@"
@@ -274,6 +283,8 @@ pa-api — tenant API helpers (uses agent's domain + app-id)
   match <url>             which app would should_inspect_app(url) return?
   check <url> [email]     classification + per-domain rule (app/action/logAction/mode)
   genai-check <domain>... run bin/check-domain-in-genai-list.sh
+  verify-maintenance-token <token>
+                          decode + verify maintenance token
   curl <path> [args...]   generic authed curl to https://\${domain}<path>
 
 Add --raw before args to skip jq formatting.
@@ -289,6 +300,6 @@ EOF
 
 _pa_api() {
   compadd whoami env get-apps get-secrets get-policy heartbeat \
-          apps-summary apps-by-name match check genai-check curl help
+          apps-summary apps-by-name match check genai-check verify-maintenance-token curl help
 }
 compdef _pa_api pa-api

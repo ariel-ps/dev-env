@@ -13,6 +13,7 @@ picks up every helper in this folder. Open a new shell to refresh.
 | `pa-api.sh` | `pa-api` — call the tenant API the agent itself uses |
 | `reset-plist.sh` | `reset-plist` — wipe Safari extension plists (user + MDM) |
 | `bin/check-domain-in-genai-list.sh` | Standalone GenAI domain checker; on PATH after load |
+| `bin/verify-maintenance-token.sh` | Standalone maintenance token decoder/verifier; on PATH after load |
 
 ## `pa` — local agent control
 
@@ -51,6 +52,8 @@ pa-api apps-summary          histogram of apps (count → name)
 pa-api apps-by-name <app>    URL patterns mapped to a given app
 pa-api match <url>           replicates should_inspect_app(url) client-side
 pa-api genai-check <dom>...  wraps bin/check-domain-in-genai-list.sh
+pa-api verify-maintenance-token <token>
+                              decode + verify a maintenance token
 pa-api curl <path> [args]    authed curl to https://${domain}<path>
 ```
 
@@ -80,6 +83,10 @@ pa-api curl /api/protect-native-apps/heartbeat -X POST -d '{"configTimestamps":{
 
 # Confirm a domain is in the GenAI list (uses bin/ helper, creds pre-injected)
 pa-api genai-check chat.openai.com claude.ai stepfun.ai
+
+# Decode a maintenance token and verify it against the tenant selected by
+# the installed agent API key
+pa-api verify-maintenance-token "$TOKEN"
 
 # Export creds for another tool / one-off curl
 eval "$(pa-api env)"
@@ -111,6 +118,19 @@ Verifies whether a domain is registered in the backend's GenAI catalogue
 + `$PROMPT_API_KEY` from the environment.
 
 `pa-api genai-check` is the easy way to invoke it — it loads creds first.
+
+## `bin/verify-maintenance-token.sh`
+
+Standalone bash script (also runnable directly — `bin/` is on PATH).
+Takes only the token, prints the decoded token JSON, then verifies it via
+`POST /api/agent/maintenance/v1/verify` using the same agent domain/API key
+resolution as `pa-api`.
+
+```bash
+verify-maintenance-token.sh "$TOKEN"
+# or
+pa-api verify-maintenance-token "$TOKEN"
+```
 
 ## Tab completion
 
