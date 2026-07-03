@@ -25,7 +25,7 @@
 ps-build-images() {
   local repo="${PS_PLATFORM_REPO:-prompt-security/ps-platform}"
   local workflow="${PS_PLATFORM_IMAGE_WORKFLOW:-build-push-docker-image-ps-platform.yml}"
-  local branch="" watch=1 images_only=0
+  local branch="" watch=1 images_only=0 services=""
 
   _psbi_usage() {
     cat <<'EOF'
@@ -54,7 +54,7 @@ EOF
 
   _psbi_need() {
     command -v gh >/dev/null 2>&1 || { echo "[ps-build-images] gh CLI not found on PATH" >&2; return 1; }
-    gh auth status >/dev/null 2>&1 || { echo "[ps-build-images] gh not authenticated — run 'gh auth login'" >&2; return 1; }
+    gh auth status --hostname github.com >/dev/null 2>&1 || { echo "[ps-build-images] gh not authenticated — run 'gh auth login'" >&2; return 1; }
   }
   # Mirror the workflow's sanitize_docker_tag(): non-[alnum_] -> '-'.
   _psbi_tag() { printf '%s' "$1" | sed 's/[^[:alnum:]_]/-/g'; }
@@ -91,6 +91,10 @@ EOF
         [ -n "$2" ] || { echo "[ps-build-images] missing value for $1" >&2; return 2; }
         branch="$2"; shift 2 ;;
       --branch=*)   branch="${1#*=}"; shift ;;
+      -s|--service|--services)
+        [ -n "$2" ] || { echo "[ps-build-images] missing value for $1" >&2; return 2; }
+        services="$2"; shift 2 ;;
+      --service=*|--services=*) services="${1#*=}"; shift ;;
       --repo)
         [ -n "$2" ] || { echo "[ps-build-images] missing value for $1" >&2; return 2; }
         repo="$2"; shift 2 ;;
@@ -119,7 +123,7 @@ EOF
   fi
 
   echo "[ps-build-images] dispatching $workflow on $repo @ $branch ..."
-  gh workflow run "$workflow" --repo "$repo" --ref "$branch" -f build_image=true || return 1
+  gh workflow run "$workflow" --repo "$repo" --ref "$branch" -f build_image=true -f services="$services" || return 1
 
   # Dispatch is async; poll briefly for the run we just created.
   local run_id="" i
