@@ -45,9 +45,15 @@ done
 
 | Profile | Docs | Provides |
 |---|---|---|
+| `ai` | — | `claude-danger`, `codex-danger`, `cl4r1t4s-sync` (cache leaked prompts to `~/.cache/CL4R1T4S`), `claude-persona` (launch claude in danger mode with a picked system prompt) |
+| `alert` | — | `gilfoyle` (audio alert), `alert8` (8-bit alert), `psay` (text-to-speech) |
 | `ps-agent` | [scripts/ps-agent/README.md](scripts/ps-agent/README.md) | `pa` (local agent control), `pa-api` (tenant API), `check-domain-in-genai-list.sh` |
 | `k8s` | — | `kubectl` aliases: `k`, `kpod`, `ksvc`, `ksts`, `kdep`, `kns`, `klogf`, `kexec`, … |
 | `docker` | — | `hermes-webui` (Hermes WebUI in Docker), `openspec-ui` (OpenSpec UI dashboard in Docker) |
+| `utils` | — | `mw-start`/`mw-stop` (mitmweb proxy + web UI), `mitm-to-jsonl` (convert flows to JSONL), `detect-msg-format`, `js-inspect`, `py-inspect` |
+
+The `alert` profile assigns each zsh session an `ALERT_SESSION_ID` and
+generates a matching 8-bit WAV at `ALERT8_SESSION_SOUND`, which `alert8` plays.
 
 ## Adding a new profile
 
