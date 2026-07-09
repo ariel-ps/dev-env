@@ -23,6 +23,8 @@ pa start       launchctl load   /Library/LaunchDaemons/com.prompt.service.plist
 pa stop        launchctl unload …
 pa restart     stop + start                    (also: par)
 pa logs        tail -f /Users/Shared/.prompt_security/service_logs.log
+pa hardening-status
+               clean hardening status + guard version/build/sha
 pa hardening-logs
                cat /Users/Shared/.prompt_security/hardening_audit.log
 pa logout      sudo prompt_agent logout

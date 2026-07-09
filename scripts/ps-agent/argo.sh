@@ -69,3 +69,71 @@ argo_env_status() {
   gh run list -R prompt-security/ps-argocd-dev-envs \
     --user="$me" --limit "$limit"
 }
+
+# Pin service image(s) in a dev-env branch's values.yaml, commit, and push.
+# Pushing makes ArgoCD auto-sync the branch — i.e. this deploys.
+#
+# usage: argo_set <branch> <imageTag> <service[:imageName]> [service2[:imageName2] ...]
+#   e.g. argo_set ariel-ps PROE-7092-HARDENING-DISABLE-WITH-ROTATION \
+#            ps-backend ps-backend-protect:ps-backend
+#
+# - <branch> is also the env dir name (environments/<branch>/values.yaml).
+# - <imageName> defaults to the service key; give svc:name when they differ
+#   (e.g. ps-backend-protect runs the ps-backend image).
+# - Registry defaults to ghcr.io/ps-prod/ (override: ARGO_SET_REGISTRY).
+# - Repo path: PS_ARGOCD_REPO (default ~/Documents/projects/ps-argocd-dev-envs).
+# - Set ARGO_SET_DRY=1 to edit + show the diff but NOT commit/push.
+argo_set() {
+  emulate -L zsh
+  local repo="${PS_ARGOCD_REPO:-$HOME/Documents/projects/ps-argocd-dev-envs}"
+  local registry="${ARGO_SET_REGISTRY:-ghcr.io/ps-prod/}"
+
+  if [[ $# -lt 3 ]]; then
+    echo "usage: argo_set <branch> <imageTag> <service[:imageName]> [service2 ...]" >&2
+    return 1
+  fi
+  command -v git     >/dev/null 2>&1 || { echo "argo_set: git not found" >&2; return 1; }
+  command -v python3 >/dev/null 2>&1 || { echo "argo_set: python3 not found" >&2; return 1; }
+  [[ -d "$repo/.git" ]] || { echo "argo_set: repo not found: $repo" >&2; return 1; }
+
+  local helper="${DEV_ENV_ROOT:-$HOME/Documents/projects/dev-env}/scripts/ps-agent/bin/argo-set-image.py"
+  [[ -f "$helper" ]] || { echo "argo_set: helper not found: $helper" >&2; return 1; }
+
+  local branch="$1"; shift
+  local tag="$1";    shift
+  local values="environments/$branch/values.yaml"
+
+  # Env branches are rewritten by CI, so a local copy always diverges. Hard-sync
+  # to origin before editing so the push is a clean fast-forward on top of HEAD.
+  git -C "$repo" fetch --quiet origin "$branch" \
+    || { echo "argo_set: fetch failed for '$branch'" >&2; return 1; }
+  git -C "$repo" checkout --quiet -B "$branch" "origin/$branch" \
+    || { echo "argo_set: checkout failed for '$branch'" >&2; return 1; }
+  [[ -f "$repo/$values" ]] \
+    || { echo "argo_set: $values not found (bad branch/env name?)" >&2; return 1; }
+
+  # Surgical text edit (see argo-set-image.py) — keeps the diff minimal and
+  # comments intact, unlike a YAML round-tripper that reformats the whole file.
+  python3 "$helper" "$repo/$values" "$registry" "$tag" "$@" \
+    || { echo "argo_set: image edit failed" >&2; return 1; }
+  local svc
+  for svc in "$@"; do
+    echo "[argo_set] ${svc%%:*} -> ${registry}${svc##*:}:${tag}"
+  done
+
+  if git -C "$repo" diff --quiet -- "$values"; then
+    echo "[argo_set] no change (already set to $tag)"
+    return 0
+  fi
+
+  if [[ -n "$ARGO_SET_DRY" ]]; then
+    echo "[argo_set] ARGO_SET_DRY set — diff only, not pushing:"
+    git -C "$repo" --no-pager diff -- "$values"
+    return 0
+  fi
+
+  git -C "$repo" add "$values"
+  git -C "$repo" commit --quiet -m "$branch: set image(s) to $tag [$*]"
+  git -C "$repo" push --quiet origin "$branch" \
+    && echo "[argo_set] pushed '$branch' — ArgoCD will sync"
+}
