@@ -56,6 +56,8 @@ pa() {
       _pa_print_hardening_guard_version "$hardening_logs"
       return "$status_rc"
       ;;
+    hardening-disable) sudo "$bin" hardening disable ${2:+"$2"} ;;
+    hardening-enable)  sudo "$bin" hardening enable ;;
     hardening-logs) sudo cat "$hardening_logs" ;;
     edit)
       local cfg="/Library/Application Support/Prompt/config.toml"
@@ -71,9 +73,9 @@ pa() {
         sudo nano "$cfg"
       )
       ;;
-    *) echo "usage: pa {status|logout|uninstall|start|stop|restart|logs|hardening-status|hardening-logs|edit}" >&2; return 1 ;;
+    *) echo "usage: pa {status|logout|uninstall|start|stop|restart|logs|hardening-status|hardening-disable|hardening-enable|hardening-logs|edit}" >&2; return 1 ;;
   esac
 }
-_pa() { compadd status logout uninstall start stop restart logs hardening-status hardening-logs edit }
+_pa() { compadd status logout uninstall start stop restart logs hardening-status hardening-disable hardening-enable hardening-logs edit }
 compdef _pa pa
 alias par='pa restart'
