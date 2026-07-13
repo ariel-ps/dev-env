@@ -14,6 +14,7 @@ picks up every helper in this folder. Open a new shell to refresh.
 | `reset-plist.sh` | `reset-plist` — wipe Safari extension plists (user + MDM) |
 | `bin/check-domain-in-genai-list.sh` | Standalone GenAI domain checker; on PATH after load |
 | `bin/verify-maintenance-token.sh` | Standalone maintenance token decoder/verifier; on PATH after load |
+| `bin/resign-agent-pkg.sh` | Re-sign an unsigned agent installer .pkg with a local J7M9U73T5B cert so the Mac Guard trusts it; on PATH after load |
 
 ## `pa` — local agent control
 
