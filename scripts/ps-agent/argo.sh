@@ -81,11 +81,11 @@ argo_env_status() {
 # - <imageName> defaults to the service key; give svc:name when they differ
 #   (e.g. ps-backend-protect runs the ps-backend image).
 # - Registry defaults to ghcr.io/ps-prod/ (override: ARGO_SET_REGISTRY).
-# - Repo path: PS_ARGOCD_REPO (default ~/Documents/projects/ps-argocd-dev-envs).
+# - Repo path: PS_ARGOCD_REPO (default ~/.cache/ps-argocd-dev-envs).
 # - Set ARGO_SET_DRY=1 to edit + show the diff but NOT commit/push.
 argo_set() {
   emulate -L zsh
-  local repo="${PS_ARGOCD_REPO:-$HOME/Documents/projects/ps-argocd-dev-envs}"
+  local repo="${PS_ARGOCD_REPO:-$HOME/.cache/ps-argocd-dev-envs}"
   local registry="${ARGO_SET_REGISTRY:-ghcr.io/ps-prod/}"
 
   if [[ $# -lt 3 ]]; then
