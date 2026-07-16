@@ -51,6 +51,7 @@ done
 | `k8s` | — | `kubectl` aliases: `k`, `kpod`, `ksvc`, `ksts`, `kdep`, `kns`, `klogf`, `kexec`, … |
 | `docker` | — | `hermes-webui` (Hermes WebUI in Docker), `openspec-ui` (OpenSpec UI dashboard in Docker) |
 | `utils` | — | `mw-start`/`mw-stop` (mitmweb proxy + web UI), `mitm-to-jsonl` (convert flows to JSONL), `detect-msg-format`, `js-inspect`, `py-inspect` |
+| `tcc` | — | `tcc-audit` (read-only inspector for the macOS TCC.db — decodes what each app is allowed/denied: camera, mic, Full Disk Access, Accessibility, ...) |
 
 The `alert` profile assigns each zsh session an `ALERT_SESSION_ID` and
 generates a matching 8-bit WAV at `ALERT8_SESSION_SOUND`, which `alert8` plays.

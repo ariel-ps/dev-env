@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# tcc-audit — inspect the macOS TCC (Transparency, Consent, Control) database.
+#
+# Read-only. Decodes the numeric auth_value / auth_reason / client_type columns
+# into human-readable text and prints a table of what each app is allowed to do.
+#
+# The per-user DB (~/Library/.../TCC.db) is readable by you. The system DB
+# (/Library/.../TCC.db) is SIP-protected — reading it needs your terminal to
+# have Full Disk Access (System Settings > Privacy & Security > Full Disk
+# Access), or run this under sudo.
+#
+# usage:
+#   tcc-audit                      # user DB, all entries
+#   tcc-audit --system             # system DB (needs FDA / sudo)
+#   tcc-audit --all                # both DBs
+#   tcc-audit -s Microphone        # filter service (substring, case-insensitive)
+#   tcc-audit -c com.apple         # filter client (substring)
+#   tcc-audit --allowed            # only granted entries
+#   tcc-audit --denied             # only denied entries
+#   tcc-audit --count              # summary counts per service, no rows
+#   tcc-audit --raw                # raw undecoded columns
+set -euo pipefail
+
+SYS_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+USER_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+
+scope="user"        # user | system | all
+svc_filter=""
+client_filter=""
+auth_filter=""      # "" | allowed | denied
+mode="table"        # table | count | raw
+
+die() { echo "tcc-audit: $*" >&2; exit 1; }
+
+while (($#)); do
+  case "$1" in
+    --user)    scope="user" ;;
+    --system)  scope="system" ;;
+    --all)     scope="all" ;;
+    -s|--service) shift; svc_filter="${1:-}" ;;
+    -c|--client)  shift; client_filter="${1:-}" ;;
+    --allowed) auth_filter="allowed" ;;
+    --denied)  auth_filter="denied" ;;
+    --count)   mode="count" ;;
+    --raw)     mode="raw" ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown arg: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found"
+
+# Escape a value for SQL by doubling single quotes. Filters match
+# case-insensitively as substrings.
+esc() { printf "%s" "$1" | sed "s/'/''/g"; }
+
+svc_filter="$(printf '%s' "$svc_filter" | tr '[:upper:]' '[:lower:]')"
+client_filter="$(printf '%s' "$client_filter" | tr '[:upper:]' '[:lower:]')"
+where="$(
+  w=""
+  add() { [[ -z "$w" ]] && w="WHERE $1" || w="$w AND $1"; }
+  [[ -n "$svc_filter" ]]    && add "LOWER(service) LIKE '%$(esc "$svc_filter")%'"
+  [[ -n "$client_filter" ]] && add "LOWER(client) LIKE '%$(esc "$client_filter")%'"
+  [[ "$auth_filter" == allowed ]] && add "auth_value=2"
+  [[ "$auth_filter" == denied  ]] && add "auth_value=0"
+  printf '%s' "$w"
+)"
+
+query_table() {
+  cat <<SQL
+SELECT
+  service,
+  CASE client_type WHEN 0 THEN client ELSE client END,
+  CASE client_type WHEN 0 THEN 'bundle' WHEN 1 THEN 'path' ELSE CAST(client_type AS TEXT) END,
+  CASE auth_value WHEN 0 THEN 'DENIED' WHEN 1 THEN 'unknown' WHEN 2 THEN 'ALLOWED' WHEN 3 THEN 'limited' ELSE CAST(auth_value AS TEXT) END,
+  CASE auth_reason
+    WHEN 1 THEN 'Error' WHEN 2 THEN 'User Consent' WHEN 3 THEN 'User Set'
+    WHEN 4 THEN 'System Set' WHEN 5 THEN 'Service Policy' WHEN 6 THEN 'MDM Policy'
+    WHEN 7 THEN 'Override Policy' WHEN 8 THEN 'Missing usage string'
+    WHEN 9 THEN 'Prompt Timeout' WHEN 10 THEN 'Preflight Unknown'
+    WHEN 11 THEN 'Entitled' WHEN 12 THEN 'App Type Policy'
+    ELSE CAST(auth_reason AS TEXT) END,
+  datetime(last_modified,'unixepoch','localtime')
+FROM access
+$where
+ORDER BY service, client;
+SQL
+}
+
+query_count() {
+  cat <<SQL
+SELECT service,
+  SUM(auth_value=2) AS allowed,
+  SUM(auth_value=0) AS denied,
+  COUNT(*) AS total
+FROM access
+$where
+GROUP BY service
+ORDER BY total DESC, service;
+SQL
+}
+
+query_raw() {
+  echo "SELECT service, client, client_type, auth_value, auth_reason, auth_version, datetime(last_modified,'unixepoch','localtime') FROM access $where ORDER BY service, client;"
+}
+
+run_db() {
+  local db="$1" label="$2"
+  if [[ ! -r "$db" ]]; then
+    echo "## $label: $db" >&2
+    echo "   not readable — grant your terminal Full Disk Access, or use sudo." >&2
+    return 1
+  fi
+  echo "## $label ($db)"
+  local sql hdr
+  case "$mode" in
+    count) sql="$(query_count)"; hdr=$'service\tallowed\tdenied\ttotal' ;;
+    raw)   sql="$(query_raw)";   hdr=$'service\tclient\tctype\tauth_value\tauth_reason\tver\tmodified' ;;
+    *)     sql="$(query_table)"; hdr=$'service\tclient\ttype\tauth\treason\tmodified' ;;
+  esac
+  # Read-only open so we never touch the live DB.
+  { printf '%s\n' "$hdr"
+    sqlite3 -readonly -separator $'\t' "$db" "$sql"
+  } | column -t -s $'\t'
+  echo
+}
+
+rc=0
+case "$scope" in
+  user)   run_db "$USER_DB" "USER" || rc=1 ;;
+  system) run_db "$SYS_DB" "SYSTEM" || rc=1 ;;
+  all)    run_db "$USER_DB" "USER" || rc=1; run_db "$SYS_DB" "SYSTEM" || rc=1 ;;
+esac
+exit $rc
