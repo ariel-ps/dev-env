@@ -46,7 +46,7 @@ done
 | Profile | Docs | Provides |
 |---|---|---|
 | `ai` | — | `claude-danger`, `codex-danger`, `cl4r1t4s-sync` (cache leaked prompts to `~/.cache/CL4R1T4S`), `claude-persona` (launch claude in danger mode with a picked system prompt) |
-| `alert` | — | `gilfoyle` (audio alert), `alert8` (8-bit alert), `psay` (text-to-speech) |
+| `alert` | — | `gilfoyle` (audio alert), `alert8` (procedural 8-bit alert), `alert8play` (random real 8-bit game sound by project), `alert8-sync` (download sound packs to cache), `psay` (text-to-speech) |
 | `ps-agent` | [scripts/ps-agent/README.md](scripts/ps-agent/README.md) | `pa` (local agent control), `pa-api` (tenant API), `check-domain-in-genai-list.sh` |
 | `k8s` | — | `kubectl` aliases: `k`, `kpod`, `ksvc`, `ksts`, `kdep`, `kns`, `klogf`, `kexec`, … |
 | `docker` | — | `hermes-webui` (Hermes WebUI in Docker), `openspec-ui` (OpenSpec UI dashboard in Docker) |
@@ -54,6 +54,25 @@ done
 
 The `alert` profile assigns each zsh session an `ALERT_SESSION_ID` and
 generates a matching 8-bit WAV at `ALERT8_SESSION_SOUND`, which `alert8` plays.
+
+`alert8play` goes further: it plays a random **real** 8-bit game sound chosen by
+the project the shell is in. Run `alert8-sync` once to download sound packs from
+archive.org into `${XDG_CACHE_HOME:-~/.cache}/dev-env-alert/sounds/<game>/`
+(nothing is bundled in the repo). Then `alert8play` detects the profile from
+`$PWD` (git repo name or path) and plays a random clip from the mapped game:
+
+| project / profile | game |
+|---|---|
+| `ps-agent` (incl. mac-guard) | Mario |
+| `ps-platform` / frontend | Mario vs. Donkey Kong |
+| `aws-vpn` | NES Metal Gear |
+| `k8s` | Sonic Advance 2 |
+| `docker` | Kirby |
+| `git` | Punch-Out |
+| anything else | Mario (default) |
+
+The downloaded clips are game rips — fine for personal use, not redistribution,
+so they live in the cache and are never committed.
 
 ## Adding a new profile
 
