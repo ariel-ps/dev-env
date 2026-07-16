@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+#
+# aws-vpn-connect — headless connect to an AWS Client VPN (SAML/federated)
+# profile from the terminal, no GUI.
+#
+# It reuses two things already installed by the official AWS VPN Client:
+#   1. the SAML-patched openvpn binary  (acvc-openvpn)
+#   2. the exported .ovpn profile        (~/.config/AWSVPNClient/OpenVpnConfigs)
+#
+# Flow (the well-known "samm-git" two-step, driven through acvc-openvpn):
+#   step 1  connect once with password "ACS::<port>" -> server replies
+#           AUTH_FAILED with a CRV1 challenge containing the IdP login URL.
+#   step 2  open that URL in the browser; the IdP POSTs the SAMLResponse to
+#           127.0.0.1:<port>, captured by aws-saml-capture.py.
+#   step 3  reconnect for real with password "CRV1::<sid>::<SAMLResponse>";
+#           openvpn (as root) brings up the tun and installs routes/DNS.
+#
+# Only step 3 needs root — steps 1-2 run as your user.
+#
+# Usage:
+#   aws-vpn-connect [profile]      connect  (default profile: ariel-ps)
+#   aws-vpn-connect --status       is a headless tunnel up?
+#   aws-vpn-connect --down         tear the headless tunnel down
+#   aws-vpn-connect --force ...    connect even if the GUI client is running
+#
+set -euo pipefail
+
+APP="/Applications/AWS VPN Client/AWS VPN Client.app"
+OVPN="$APP/Contents/Resources/openvpn/acvc-openvpn"
+CFG_DIR="$HOME/.config/AWSVPNClient/OpenVpnConfigs"
+RUN_DIR="$HOME/.config/AWSVPNClient/headless"
+PIDFILE="$RUN_DIR/openvpn.pid"
+LOGFILE="$RUN_DIR/openvpn.log"
+SAML_PORT=35001
+CAPTURE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/aws-saml-capture.py"
+
+log()  { printf '\033[36m[aws-vpn]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[33m[aws-vpn]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m[aws-vpn]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ── subcommands ───────────────────────────────────────────────────────────
+headless_pid() { [ -f "$PIDFILE" ] && cat "$PIDFILE" 2>/dev/null || true; }
+
+is_up() {
+  local pid; pid="$(headless_pid)"
+  [ -n "$pid" ] && ps -p "$pid" >/dev/null 2>&1
+}
+
+cmd_status() {
+  if is_up; then
+    log "headless tunnel UP (pid $(headless_pid))"
+    grep -q "Initialization Sequence Completed" "$LOGFILE" 2>/dev/null \
+      && log "init sequence completed" \
+      || warn "process alive but init not yet complete — check $LOGFILE"
+    return 0
+  fi
+  log "headless tunnel down"
+  return 1
+}
+
+cmd_down() {
+  local pid; pid="$(headless_pid)"
+  if [ -z "$pid" ] || ! ps -p "$pid" >/dev/null 2>&1; then
+    log "no headless tunnel running"
+    rm -f "$PIDFILE"
+    return 0
+  fi
+  log "stopping headless tunnel (pid $pid) — needs sudo"
+  sudo kill "$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do ps -p "$pid" >/dev/null 2>&1 || break; sleep 0.5; done
+  ps -p "$pid" >/dev/null 2>&1 && sudo kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PIDFILE"
+  log "disconnected"
+}
+
+# ── connect ───────────────────────────────────────────────────────────────
+cmd_connect() {
+  local profile="$1" force="$2"
+  local src_cfg="$CFG_DIR/$profile"
+
+  [ -x "$OVPN" ]     || die "acvc-openvpn not found — is the AWS VPN Client installed? ($OVPN)"
+  [ -f "$src_cfg" ]  || die "profile '$profile' not found at $src_cfg"
+  [ -f "$CAPTURE" ]  || die "capture helper missing: $CAPTURE"
+  command -v python3 >/dev/null || die "python3 not on PATH"
+
+  if is_up; then
+    die "a headless tunnel is already up (pid $(headless_pid)) — 'aws-vpn-connect --down' first"
+  fi
+  # The GUI client and a headless tunnel to the same endpoint will fight over
+  # routes/tun. Refuse unless --force.
+  if pgrep -f 'acvc-openvpn.*TempConfigs' >/dev/null 2>&1 && [ "$force" != 1 ]; then
+    die "the GUI AWS VPN Client has an active tunnel — disconnect/quit it first (or pass --force)"
+  fi
+
+  mkdir -p "$RUN_DIR"; chmod 700 "$RUN_DIR"
+  # NOTE: not 'local' — the EXIT trap fires after this function returns, so the
+  # var must outlive the frame (and be guarded with :- under set -u).
+  _AWSVPN_WORK="$(mktemp -d "$RUN_DIR/run.XXXXXX")"; chmod 700 "$_AWSVPN_WORK"
+  local work="$_AWSVPN_WORK"
+  local tmp_cfg="$work/config.ovpn"
+  local cred1="$work/cred1"  cred2="$work/cred2"
+  local step1_log="$work/step1.log"
+  # Cred files hold the SAML session token — wipe the whole work dir on exit.
+  trap 'rm -rf "${_AWSVPN_WORK:-}"' EXIT
+
+  # We supply creds via --auth-user-pass ourselves, and want step 1 to fail
+  # once (not prompt/retry), so strip those directives from the profile copy.
+  grep -vE '^[[:space:]]*(auth-user-pass|auth-retry)([[:space:]]|$)' \
+    "$src_cfg" > "$tmp_cfg"
+
+  # ── step 1: obtain the SAML login URL ────────────────────────────────────
+  log "step 1/3 — requesting SAML challenge from endpoint"
+  umask 077
+  printf 'N/A\nACS::%s\n' "$SAML_PORT" > "$cred1"
+  # No tun is created before auth, so this runs as your user (no sudo).
+  "$OVPN" --config "$tmp_cfg" \
+          --auth-user-pass "$cred1" \
+          --auth-retry none \
+          --connect-timeout 15 --connect-retry-max 1 \
+          --verb 4 --log "$step1_log" >/dev/null 2>&1 || true
+
+  local chal url sid
+  chal="$(grep -o 'AUTH_FAILED,CRV1:R:[^ ]*' "$step1_log" | tail -1 || true)"
+  [ -n "$chal" ] || die "no SAML challenge received — see $step1_log"
+  url="$(grep -oE 'https://[^ ]+' <<<"$chal" | tail -1)"; url="${url%\"}"
+  sid="$(sed -E 's/^AUTH_FAILED,CRV1:R:([^:]+):.*/\1/' <<<"$chal")"
+  [ -n "$url" ] && [ -n "$sid" ] || die "could not parse SAML challenge: $chal"
+
+  # ── step 2: browser login + capture the SAMLResponse ─────────────────────
+  log "step 2/3 — opening browser for SSO login (waiting on 127.0.0.1:$SAML_PORT)"
+  local saml_file="$work/saml"
+  python3 "$CAPTURE" "$SAML_PORT" 180 > "$saml_file" 2>"$work/capture.err" &
+  local cap_pid=$!
+  sleep 0.4               # let the listener bind before the browser POSTs
+  open "$url" 2>/dev/null || warn "could not auto-open browser — visit:\n$url"
+  if ! wait "$cap_pid"; then
+    die "SAML capture failed: $(cat "$work/capture.err" 2>/dev/null)"
+  fi
+  local saml; saml="$(cat "$saml_file")"
+  [ -n "$saml" ] || die "empty SAMLResponse captured"
+  log "SSO login captured"
+
+  # ── step 3: real connect (needs root for tun + routes) ───────────────────
+  log "step 3/3 — establishing tunnel (needs sudo)"
+  printf 'N/A\nCRV1::%s::%s\n' "$sid" "$saml" > "$cred2"
+  sudo -v || die "sudo required to bring up the tunnel"
+  rm -f "$PIDFILE"
+  # openvpn installs the pushed routes itself, so no --up/--down script is
+  # needed for connectivity. (We skip AWS's client.up/down: they live under a
+  # space-containing path and expect UV_AWS_CLIENT_* env the GUI sets. Trade-off:
+  # split-DNS from the endpoint isn't applied — VM access is IP-based anyway.)
+  sudo "$OVPN" --config "$tmp_cfg" \
+               --auth-user-pass "$cred2" \
+               --auth-nocache \
+               --log "$LOGFILE" --writepid "$PIDFILE" \
+               --connect-retry 2 5 --connect-timeout 15 \
+               --daemon
+
+  # Wait for the tunnel to come up.
+  local ok=0
+  for _ in $(seq 1 30); do
+    if grep -q "Initialization Sequence Completed" "$LOGFILE" 2>/dev/null; then
+      ok=1; break
+    fi
+    if grep -qE "AUTH_FAILED|process exiting|Exiting due to fatal error" "$LOGFILE" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "$ok" = 1 ]; then
+    log "connected — profile '$profile' is up. logs: $LOGFILE"
+  else
+    warn "tunnel did not confirm within 30s — check $LOGFILE"
+    return 1
+  fi
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────
+main() {
+  local force=0 profile="ariel-ps" action="connect"
+  for arg in "$@"; do
+    case "$arg" in
+      --status) action="status" ;;
+      --down|--disconnect) action="down" ;;
+      --force) force=1 ;;
+      -*) die "unknown flag: $arg" ;;
+      *) profile="$arg" ;;
+    esac
+  done
+  case "$action" in
+    status)  cmd_status ;;
+    down)    cmd_down ;;
+    connect) cmd_connect "$profile" "$force" ;;
+  esac
+}
+
+main "$@"
