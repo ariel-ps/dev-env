@@ -38,6 +38,17 @@ alias kapp='kubectl apply -f'
 alias kdel='kubectl delete'
 alias kctx='kubectl config current-context'
 
+# List pods and their container images, one row per container.
+# usage: kpod-image [namespace] [extra kubectl args...]
+#   namespace defaults to dev-ariel-ps; pass another name to override.
+kpod-image() {
+  local ns="${1:-dev-ariel-ps}"
+  [[ $# -gt 0 ]] && shift
+  kubectl get pods -n "$ns" "$@" -o json \
+    | jq -r '.items[] | .metadata.name as $n | .spec.containers[] | "\($n)\t\(.image)"' \
+    | column -t -s$'\t'
+}
+
 # Connect to an EKS cluster and optionally pin a namespace.
 # usage: k_connect <cluster-name> <region> [namespace]
 k_connect() {
