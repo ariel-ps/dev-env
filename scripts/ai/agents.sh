@@ -14,6 +14,10 @@ codex-danger() {
 CL4R1T4S_REPO="${CL4R1T4S_REPO:-https://github.com/elder-plinius/CL4R1T4S.git}"
 CL4R1T4S_DIR="${CL4R1T4S_DIR:-$HOME/.cache/CL4R1T4S}"
 
+# PentestGPT checkout cache. Override PENTESTGPT_DIR to place it elsewhere.
+PENTESTGPT_REPO="${PENTESTGPT_REPO:-https://github.com/GreyDGL/PentestGPT.git}"
+PENTESTGPT_DIR="${PENTESTGPT_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/PentestGPT}"
+
 # Clone the prompt repo on first run, fast-forward it on later runs.
 cl4r1t4s-sync() {
   command -v git >/dev/null 2>&1 || { echo "cl4r1t4s-sync: git not found on PATH" >&2; return 1; }
@@ -22,6 +26,17 @@ cl4r1t4s-sync() {
   else
     mkdir -p "${CL4R1T4S_DIR:h}" && git clone "$CL4R1T4S_REPO" "$CL4R1T4S_DIR"
   fi
+}
+
+# Clone PentestGPT on first run, fast-forward it on later runs.
+pentestgpt-sync() {
+  command -v git >/dev/null 2>&1 || { echo "pentestgpt-sync: git not found on PATH" >&2; return 1; }
+  if [ -d "$PENTESTGPT_DIR/.git" ]; then
+    git -C "$PENTESTGPT_DIR" pull --ff-only
+  else
+    mkdir -p "${PENTESTGPT_DIR:h}" && git clone "$PENTESTGPT_REPO" "$PENTESTGPT_DIR"
+  fi
+  echo "pentestgpt-sync: $PENTESTGPT_DIR" >&2
 }
 
 # Pick a system prompt from the cache and launch claude with it (danger mode).

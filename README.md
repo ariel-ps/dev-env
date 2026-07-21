@@ -45,7 +45,7 @@ done
 
 | Profile | Docs | Provides |
 |---|---|---|
-| `ai` | — | `claude-danger`, `codex-danger`, `cl4r1t4s-sync` (cache leaked prompts to `~/.cache/CL4R1T4S`), `claude-persona` (launch claude in danger mode with a picked system prompt) |
+| `ai` | — | `claude-danger`, `codex-danger`, `cl4r1t4s-sync` (cache leaked prompts to `~/.cache/CL4R1T4S`), `pentestgpt-sync` (cache PentestGPT to `${XDG_CACHE_HOME:-~/.cache}/PentestGPT`), `claude-persona` (launch claude in danger mode with a picked system prompt) |
 | `alert` | — | `gilfoyle` (audio alert), `alert8` (procedural 8-bit alert), `alert8play` (random real 8-bit game sound by project), `alert8-sync` (download sound packs to cache), `psay` (text-to-speech) |
 | `ps-agent` | [scripts/ps-agent/README.md](scripts/ps-agent/README.md) | `pa` (local agent control), `pa-api` (tenant API), `check-domain-in-genai-list.sh` |
 | `k8s` | — | `kubectl` aliases: `k`, `kpod`, `ksvc`, `ksts`, `kdep`, `kns`, `klogf`, `kexec`, … |
