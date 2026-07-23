@@ -53,6 +53,7 @@ done
 | `utils` | — | `mw-start`/`mw-stop` (mitmweb proxy + web UI), `mitm-to-jsonl` (convert flows to JSONL), `detect-msg-format`, `js-inspect`, `py-inspect` |
 | `term` | — | `flash-term` (flash the calling terminal's window a color then restore — identifies the emulator + pts by walking process ancestry, so it works even when stdout is a pipe, e.g. under Claude Code), `pflash` (mood-driven combo: flash a mood-matched color **and** play the matching `psound` together, e.g. `pflash done`/`pflash error`) |
 | `tcc` | — | `tcc-audit` (read-only inspector for the macOS TCC.db — decodes what each app is allowed/denied: camera, mic, Full Disk Access, Accessibility, ...) |
+| `vm` | — | `vm_network_fix` — two modes. **Proxy** (Windows VM outbound HTTPS): starts a Mac-host CONNECT proxy the VM points `HTTPS_PROXY` at (`status`/`stop`/`diag`). **VPN-share** (macOS VM reaching a private VPC over the host's corp VPN): `vpn` enables IP forwarding + pf NAT masquerading the VM subnet out the auto-detected VPN utun (`vpn-status`/`vpn-stop`). |
 
 The `alert` profile assigns each zsh session an `ALERT_SESSION_ID` and
 generates a matching 8-bit WAV at `ALERT8_SESSION_SOUND`, which `alert8` plays.
