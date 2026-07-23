@@ -51,6 +51,7 @@ done
 | `k8s` | — | `kubectl` aliases: `k`, `kpod`, `ksvc`, `ksts`, `kdep`, `kns`, `klogf`, `kexec`, … |
 | `docker` | — | `hermes-webui` (Hermes WebUI in Docker), `openspec-ui` (OpenSpec UI dashboard in Docker) |
 | `utils` | — | `mw-start`/`mw-stop` (mitmweb proxy + web UI), `mitm-to-jsonl` (convert flows to JSONL), `detect-msg-format`, `js-inspect`, `py-inspect` |
+| `term` | — | `flash-term` (flash the calling terminal's window a color then restore — identifies the emulator + pts by walking process ancestry, so it works even when stdout is a pipe, e.g. under Claude Code), `pflash` (mood-driven combo: flash a mood-matched color **and** play the matching `psound` together, e.g. `pflash done`/`pflash error`) |
 | `tcc` | — | `tcc-audit` (read-only inspector for the macOS TCC.db — decodes what each app is allowed/denied: camera, mic, Full Disk Access, Accessibility, ...) |
 
 The `alert` profile assigns each zsh session an `ALERT_SESSION_ID` and
@@ -74,6 +75,12 @@ archive.org into `${XDG_CACHE_HOME:-~/.cache}/dev-env-alert/sounds/<game>/`
 
 The downloaded clips are game rips — fine for personal use, not redistribution,
 so they live in the cache and are never committed.
+
+Every sound function (`gilfoyle`, `alert8`, `alert8play`, `psound`, `psay`, and
+`pnotify` via `psound`) also fires a matching terminal flash through the `term`
+profile's `flash-term`. Errors flash red, wins green, and so on. The flash is a
+no-op when the `term` profile isn't loaded; disable it globally with
+`FLASH_ON_SOUND=0`.
 
 ## Adding a new profile
 

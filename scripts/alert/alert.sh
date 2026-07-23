@@ -53,6 +53,21 @@ _alert_resolve_volume() {
   print -r -- "$volume"
 }
 
+# Fire a terminal flash to accompany a sound, overlapping (background, disowned).
+# Depends on `flash-term` from the term profile; no-op if that isn't loaded.
+# Disable globally with FLASH_ON_SOUND=0. usage: _alert_flash [color|mood]
+#   A known mood is mapped to a color via _flash_mood_color; otherwise the
+#   argument is passed straight to flash-term (which accepts names and hex).
+_alert_flash() {
+  [[ "${FLASH_ON_SOUND:-1}" == 1 ]] || return 0
+  typeset -f flash-term >/dev/null 2>&1 || return 0
+  local key="${1:-done}" color="${1:-green}"
+  if typeset -f _flash_mood_color >/dev/null 2>&1 && [[ -n "${_FLASH_MOOD_COLOR[$key]:-}" ]]; then
+    color="$(_flash_mood_color "$key")"
+  fi
+  flash-term "$color" >/dev/null 2>&1 &!
+}
+
 # usage: gilfoyle [volume|preset]
 #   default volume comes from GILFOYLE_VOLUME and defaults to 1.8
 #   presets: calm/quiet=0.4, normal=1.0, loud=1.8, louder=2.5, max=3.0
@@ -68,6 +83,7 @@ gilfoyle() {
     || { echo "gilfoyle: afplay not found (macOS only)" >&2; return 1; }
   [[ -r "$sound" ]] \
     || { echo "gilfoyle: sound not found: $sound" >&2; return 1; }
+  _alert_flash red
   afplay -v "$vol" "$sound"
 }
 
@@ -88,6 +104,7 @@ alert8() {
     || { echo "alert8: afplay not found (macOS only)" >&2; return 1; }
   [[ -r "$sound" ]] \
     || { echo "alert8: sound not found: $sound" >&2; return 1; }
+  _alert_flash green
   afplay -v "$vol" "$sound"
 }
 
@@ -225,6 +242,7 @@ alert8play() {
   # 30-second block. Override with ALERT8_MAX_SECONDS (empty = play in full).
   local -a cap
   [[ -n "${ALERT8_MAX_SECONDS-3}" ]] && cap=(-t "${ALERT8_MAX_SECONDS:-3}")
+  _alert_flash green
   afplay -v "$vol" $cap "$pick"
 }
 
@@ -299,6 +317,7 @@ psound() {
   fi
   local -a cap
   [[ -n "${ALERT8_MAX_SECONDS-3}" ]] && cap=(-t "${ALERT8_MAX_SECONDS:-3}")
+  _alert_flash "$mood"
   afplay -v "$vol" $cap "${hit[1]}"
 }
 
@@ -375,5 +394,6 @@ psay() {
   local args=()
   [[ -n "$PSAY_RATE" ]]  && args+=(-r "$PSAY_RATE")
   [[ -n "$PSAY_VOICE" ]] && args+=(-v "$PSAY_VOICE")
+  _alert_flash blue
   say "${args[@]}" -- "$*"
 }
