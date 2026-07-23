@@ -1,0 +1,66 @@
+README.md
+  5dbeac3cbc29c5fd 54,79-84
+scripts/alert/alert.sh
+  5dbeac3cbc29c5fd 56-70,86,107,245,320,397
+scripts/term/flash.sh
+  5dbeac3cbc29c5fd 1-140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "29be1c98b3dbb6b15c474dac4d8ccf6d2b4bf0f1",
+  "prompts": {
+    "12724b848a835e57": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9831d78d-ecab-47d4-87f0-f9d067e7be56",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 76,
+      "total_deletions": 7,
+      "accepted_lines": 68,
+      "overriden_lines": 0
+    },
+    "23086b6f41197577": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b86b0de0-7c0e-4fbe-8d8e-27c4110acccd",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 26,
+      "total_deletions": 7,
+      "accepted_lines": 26,
+      "overriden_lines": 0
+    },
+    "5dbeac3cbc29c5fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6d9567da-12bf-411d-8006-3dd1d567bf79",
+        "model": "unknown"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 174,
+      "total_deletions": 8,
+      "accepted_lines": 167,
+      "overriden_lines": 0
+    },
+    "eb5c8fb90cc231c5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "56223b38-6b22-471f-92ab-d0901029c207",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 210,
+      "total_deletions": 0,
+      "accepted_lines": 203,
+      "overriden_lines": 0
+    }
+  }
+}
