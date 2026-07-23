@@ -1,0 +1,23 @@
+README.md
+  5dbeac3cbc29c5fd 56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "2cbef1fd70021f2dea27bacfc7ac38ec8d9700ab",
+  "prompts": {
+    "5dbeac3cbc29c5fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6d9567da-12bf-411d-8006-3dd1d567bf79",
+        "model": "unknown"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
