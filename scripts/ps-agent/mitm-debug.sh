@@ -21,6 +21,13 @@
 # Capture goes to $PS_MITM_DEBUG_CACHE/mitm_capture.jsonl. View it with:
 #   mitm-watch.py "$PS_MITM_DEBUG_CACHE/mitm_capture.jsonl"
 #
+# Everything mitm-debug touches lives under $PS_MITM_DEBUG_CACHE:
+#   config.toml           generated dev config (own port, real domain/api_key)
+#   mitm-debug.pid/.log   the running process's pid and stdout+stderr
+#   mitm_capture.jsonl    captured traffic, read by mitm-watch.py
+#   .certs/               this instance's own (untrusted-by-default) dev CA
+#   ps-agent-<branch>/    the synced checkout mitm-debug-run execs into
+#
 # System-wide proxy is risky: if this process dies while the system proxy
 # still points at its port, EVERYTHING on the Mac loses internet, not just
 # whatever you're debugging - not a hypothetical, it happened. So
@@ -33,6 +40,14 @@ PS_MITM_DEBUG_NETWORK_SERVICE="${PS_MITM_DEBUG_NETWORK_SERVICE:-Wi-Fi}"
 PS_MITM_DEBUG_BRANCH="${PS_MITM_DEBUG_BRANCH:-debug-traffic}"
 _PS_MITM_DEBUG_REPO="${PS_MITM_DEBUG_REPO:-git@github.com:prompt-security/ps-agent.git}"
 _PS_MITM_DEBUG_CHECKOUT="$PS_MITM_DEBUG_CACHE/ps-agent-${PS_MITM_DEBUG_BRANCH}"
+
+# All state lives under one cache dir - defined once here so mitm-debug-run
+# and mitm-debug-stop can never disagree about where a file is.
+_PS_MITM_DEBUG_CONFIG="$PS_MITM_DEBUG_CACHE/config.toml"
+_PS_MITM_DEBUG_PIDFILE="$PS_MITM_DEBUG_CACHE/mitm-debug.pid"
+_PS_MITM_DEBUG_LOGFILE="$PS_MITM_DEBUG_CACHE/mitm-debug.log"
+_PS_MITM_DEBUG_CAPTURE="$PS_MITM_DEBUG_CACHE/mitm_capture.jsonl"
+_PS_MITM_DEBUG_CERTDIR="$PS_MITM_DEBUG_CACHE/.certs"
 
 mitm-debug-proxy-on() {
   local port="$1"
@@ -83,12 +98,13 @@ mitm-debug-sync() {
 # Write a small dev config.toml (own port, log_dev_debug always on, local
 # scanners off) the first time, reusing domain/api_key from the real
 # installed config so the heartbeat/policy fetch still authenticates.
+#
+# Always rewrite (not just on first run) so the port always matches this
+# run's auto-selected free port - a stale config from an earlier port would
+# silently make the proxy listen on the wrong port.
 _mitm_debug_ensure_config() {
-  local cfg="$PS_MITM_DEBUG_CACHE/config.toml"
   local port="$1"
-  # Always rewrite (not just on first run) so the port always matches this
-  # run's auto-selected free port - a stale config from an earlier port
-  # would silently make the proxy listen on the wrong port.
+  local cfg="$_PS_MITM_DEBUG_CONFIG"
 
   local real_cfg="/Library/Application Support/Prompt/config.toml"
   local content
@@ -124,52 +140,59 @@ EOF
   echo "mitm-debug: wrote dev config -> $cfg (port=$port)"
 }
 
-mitm-debug-run() {
-  local port="${1:-38080}"
-
-  mitm-debug-sync
-
-  local pidfile="$PS_MITM_DEBUG_CACHE/mitm-debug.pid"
-  if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    echo "mitm-debug-run: already running (pid $(cat "$pidfile")). Run mitm-debug-stop first." >&2
-    return 1
-  fi
-
-  # Auto-advance to a free port if the requested one is taken - use netstat
-  # (not lsof), which sees listeners owned by other users/sandboxes too.
-  local tries=0
+# Auto-advance from the requested port to a free one - use netstat (not
+# lsof), which sees listeners owned by other users/sandboxes too. Prints the
+# free port on success; prints nothing and fails after 20 tries.
+_mitm_debug_free_port() {
+  local port="$1" tries=0
   while netstat -an -p tcp | grep -qE "[.*]\.${port}\b.*LISTEN"; do
     port=$((port + 1))
     tries=$((tries + 1))
     if [ "$tries" -ge 20 ]; then
-      echo "mitm-debug-run: no free port found near ${1:-38080}" >&2; return 1
+      echo "mitm-debug-run: no free port found near $1" >&2
+      return 1
     fi
   done
+  echo "$port"
+}
+
+mitm-debug-run() {
+  local requested_port="${1:-38080}"
+
+  if [ -f "$_PS_MITM_DEBUG_PIDFILE" ]; then
+    local running_pid; running_pid="$(cat "$_PS_MITM_DEBUG_PIDFILE")"
+    if kill -0 "$running_pid" 2>/dev/null; then
+      echo "mitm-debug-run: already running (pid $running_pid). Run mitm-debug-stop first." >&2
+      return 1
+    fi
+  fi
+
+  mitm-debug-sync
+
+  local port
+  port="$(_mitm_debug_free_port "$requested_port")" || return 1
 
   local pybin
   pybin="$(_mitm_debug_python)" || return 1
 
   _mitm_debug_ensure_config "$port"
 
-  local logfile="$PS_MITM_DEBUG_CACHE/mitm-debug.log"
-  local capture="$PS_MITM_DEBUG_CACHE/mitm_capture.jsonl"
-  local certdir="$PS_MITM_DEBUG_CACHE/.certs"
   local cert_is_new=0
-  [ -f "$certdir/mitmproxy-ca-cert.pem" ] || cert_is_new=1
+  [ -f "$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem" ] || cert_is_new=1
 
   ( cd "$_PS_MITM_DEBUG_CHECKOUT" \
-    && PS_CONFIG_FILE_PATH="$PS_MITM_DEBUG_CACHE/config.toml" \
-       PS_MITM_CAPTURE_PATH="$capture" \
-       PS_PROXY_CERT_DIR="$certdir" \
+    && PS_CONFIG_FILE_PATH="$_PS_MITM_DEBUG_CONFIG" \
+       PS_MITM_CAPTURE_PATH="$_PS_MITM_DEBUG_CAPTURE" \
+       PS_PROXY_CERT_DIR="$_PS_MITM_DEBUG_CERTDIR" \
        "$pybin" debug_traffic_run.py \
-  ) >"$logfile" 2>&1 &
+  ) >"$_PS_MITM_DEBUG_LOGFILE" 2>&1 &
   local mpid=$!
-  echo "$mpid" > "$pidfile"
+  echo "$mpid" > "$_PS_MITM_DEBUG_PIDFILE"
 
   sleep 1
   if ! kill -0 "$mpid" 2>/dev/null; then
-    echo "mitm-debug-run: failed to start. See $logfile" >&2
-    rm -f "$pidfile"
+    echo "mitm-debug-run: failed to start. See $_PS_MITM_DEBUG_LOGFILE" >&2
+    rm -f "$_PS_MITM_DEBUG_PIDFILE"
     return 1
   fi
 
@@ -181,15 +204,15 @@ mitm-debug-run() {
   # and re-run separately.
   if [ "$cert_is_new" = 1 ]; then
     sleep 1
-    if [ -f "$certdir/mitmproxy-ca-cert.pem" ]; then
+    if [ -f "$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem" ]; then
       echo "mitm-debug: trusting freshly generated dev CA (sudo needed) ..."
-      sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$certdir/mitmproxy-ca-cert.pem"
+      sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem"
     fi
   fi
 
   echo "mitm-debug proxy on 127.0.0.1:${port} (pid $mpid)"
   echo "  python  -> $pybin"
-  echo "  capture -> $capture"
+  echo "  capture -> $_PS_MITM_DEBUG_CAPTURE"
 
   # Self-test through the real system trust store (no --cacert override) -
   # this is exactly what a real client app will see. Only flip the system
@@ -197,25 +220,24 @@ mitm-debug-run() {
   # a chance to take down the whole Mac's internet.
   if curl -x "http://127.0.0.1:${port}" -sS -o /dev/null -m 5 -w "" https://www.google.com/ 2>/dev/null; then
     mitm-debug-proxy-on "$port"
-    echo "  view with: mitm-watch.py \"$capture\""
+    echo "  view with: mitm-watch.py \"$_PS_MITM_DEBUG_CAPTURE\""
     echo "  when done: mitm-debug-stop  (also disables the system proxy)"
   else
     echo "mitm-debug: self-test through the proxy failed - NOT enabling the system proxy." >&2
-    echo "  Check $logfile, or trust the CA if this is a fresh cert dir, then re-run." >&2
+    echo "  Check $_PS_MITM_DEBUG_LOGFILE, or trust the CA if this is a fresh cert dir, then re-run." >&2
   fi
 }
 
 mitm-debug-stop() {
-  local pidfile="$PS_MITM_DEBUG_CACHE/mitm-debug.pid"
-  if [ -f "$pidfile" ]; then
-    local mpid; mpid="$(cat "$pidfile")"
+  if [ -f "$_PS_MITM_DEBUG_PIDFILE" ]; then
+    local mpid; mpid="$(cat "$_PS_MITM_DEBUG_PIDFILE")"
     if kill -0 "$mpid" 2>/dev/null; then
       kill "$mpid" 2>/dev/null
       echo "Stopped mitm-debug (pid $mpid)"
     else
       echo "mitm-debug (pid $mpid) not running" >&2
     fi
-    rm -f "$pidfile"
+    rm -f "$_PS_MITM_DEBUG_PIDFILE"
   else
     echo "mitm-debug-stop: no pidfile (process may still be running elsewhere)" >&2
   fi
