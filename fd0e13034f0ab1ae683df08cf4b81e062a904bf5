@@ -1,0 +1,23 @@
+scripts/ps-agent/mitm-debug.sh
+  917ba63df7fbe98b 15-19,33-35,74-76,78-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "fd0e13034f0ab1ae683df08cf4b81e062a904bf5",
+  "prompts": {
+    "917ba63df7fbe98b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9412627f-79f7-43fc-9348-2f91c02af1b8",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 13,
+      "total_deletions": 10,
+      "accepted_lines": 13,
+      "overriden_lines": 0
+    }
+  }
+}
