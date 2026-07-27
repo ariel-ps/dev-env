@@ -1,0 +1,49 @@
+scripts/ps-agent/mitm-debug.sh
+  4ec85f4b3cdd1a97 1-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "d05fadbb1015527b4913b5e24f067317bb642a39",
+  "prompts": {
+    "4ec85f4b3cdd1a97": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e62c7357-c80f-4f98-84e2-5350bd7f3945",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 297,
+      "total_deletions": 35,
+      "accepted_lines": 264,
+      "overriden_lines": 0
+    },
+    "79d89a5ccc6959cf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "21711f98-e9fc-4b28-b9f6-3f7001c55f0c",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 64,
+      "total_deletions": 0,
+      "accepted_lines": 64,
+      "overriden_lines": 0
+    },
+    "9f80a119b147c804": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cf7444a8-442e-45fb-9ba4-69b6376ddf58",
+        "model": "unknown"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 108,
+      "total_deletions": 0,
+      "accepted_lines": 108,
+      "overriden_lines": 0
+    }
+  }
+}
