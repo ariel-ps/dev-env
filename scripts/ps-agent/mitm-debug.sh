@@ -35,19 +35,31 @@
 # request succeeds through it, and mitm-debug-stop ALWAYS flips it back off
 # unconditionally, even if it thinks it wasn't the one that set it.
 
+# --- user-tunable (env-overridable) ---
 PS_MITM_DEBUG_CACHE="${PS_MITM_DEBUG_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/dev-env-ps-agent}"
 PS_MITM_DEBUG_NETWORK_SERVICE="${PS_MITM_DEBUG_NETWORK_SERVICE:-Wi-Fi}"
 PS_MITM_DEBUG_BRANCH="${PS_MITM_DEBUG_BRANCH:-debug-traffic}"
+PS_MITM_DEBUG_DEFAULT_PORT="${PS_MITM_DEBUG_DEFAULT_PORT:-38080}"
 _PS_MITM_DEBUG_REPO="${PS_MITM_DEBUG_REPO:-git@github.com:prompt-security/ps-agent.git}"
-_PS_MITM_DEBUG_CHECKOUT="$PS_MITM_DEBUG_CACHE/ps-agent-${PS_MITM_DEBUG_BRANCH}"
 
-# All state lives under one cache dir - defined once here so mitm-debug-run
-# and mitm-debug-stop can never disagree about where a file is.
+# --- fixed internals (not meant to be overridden) ---
+_PS_MITM_DEBUG_ENTRYPOINT="debug_traffic_run.py"
+_PS_MITM_DEBUG_CONDA_PYTHON="$HOME/miniconda3/bin/python3"
+_PS_MITM_DEBUG_REAL_CONFIG="/Library/Application Support/Prompt/config.toml"
+_PS_MITM_DEBUG_SELFTEST_URL="https://www.google.com/"
+_PS_MITM_DEBUG_SYSTEM_KEYCHAIN="/Library/Keychains/System.keychain"
+_PS_MITM_DEBUG_PORT_SCAN_TRIES=20
+
+# --- derived paths - all state lives under one cache dir, defined once here
+# so mitm-debug-run and mitm-debug-stop can never disagree about where a
+# file is ---
+_PS_MITM_DEBUG_CHECKOUT="$PS_MITM_DEBUG_CACHE/ps-agent-${PS_MITM_DEBUG_BRANCH}"
 _PS_MITM_DEBUG_CONFIG="$PS_MITM_DEBUG_CACHE/config.toml"
 _PS_MITM_DEBUG_PIDFILE="$PS_MITM_DEBUG_CACHE/mitm-debug.pid"
 _PS_MITM_DEBUG_LOGFILE="$PS_MITM_DEBUG_CACHE/mitm-debug.log"
 _PS_MITM_DEBUG_CAPTURE="$PS_MITM_DEBUG_CACHE/mitm_capture.jsonl"
 _PS_MITM_DEBUG_CERTDIR="$PS_MITM_DEBUG_CACHE/.certs"
+_PS_MITM_DEBUG_CA_CERT="$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem"
 
 mitm-debug-proxy-on() {
   local port="$1"
@@ -75,11 +87,11 @@ mitm-debug-proxy-off() {
 # connection fails" bug that looked identical to a real code bug.
 _mitm_debug_python() {
   local candidate
-  for candidate in "${PS_MITM_DEBUG_PYTHON:-}" "$HOME/miniconda3/bin/python3" "$(command -v python3)"; do
+  for candidate in "${PS_MITM_DEBUG_PYTHON:-}" "$_PS_MITM_DEBUG_CONDA_PYTHON" "$(command -v python3)"; do
     [ -n "$candidate" ] || continue
     "$candidate" -c "import mitmproxy" >/dev/null 2>&1 && { echo "$candidate"; return 0; }
   done
-  echo "mitm-debug: no python with mitmproxy installed found (tried \$PS_MITM_DEBUG_PYTHON, ~/miniconda3/bin/python3, \$(command -v python3))" >&2
+  echo "mitm-debug: no python with mitmproxy installed found (tried \$PS_MITM_DEBUG_PYTHON, $_PS_MITM_DEBUG_CONDA_PYTHON, \$(command -v python3))" >&2
   return 1
 }
 
@@ -106,9 +118,8 @@ _mitm_debug_ensure_config() {
   local port="$1"
   local cfg="$_PS_MITM_DEBUG_CONFIG"
 
-  local real_cfg="/Library/Application Support/Prompt/config.toml"
   local content
-  content="$(cat "$real_cfg" 2>/dev/null)" || content="$(sudo cat "$real_cfg" 2>/dev/null)"
+  content="$(cat "$_PS_MITM_DEBUG_REAL_CONFIG" 2>/dev/null)" || content="$(sudo cat "$_PS_MITM_DEBUG_REAL_CONFIG" 2>/dev/null)"
   local domain api_key
   domain="$(printf '%s\n' "$content" | awk -F'=' '/^\[app\]/{f=1;next} /^\[/{f=0} f && $1=="domain"{print $2; exit}')"
   api_key="$(printf '%s\n' "$content" | awk -F'=' '/^\[app\]/{f=1;next} /^\[/{f=0} f && $1=="api_key"{print $2; exit}')"
@@ -142,13 +153,14 @@ EOF
 
 # Auto-advance from the requested port to a free one - use netstat (not
 # lsof), which sees listeners owned by other users/sandboxes too. Prints the
-# free port on success; prints nothing and fails after 20 tries.
+# free port on success; prints nothing and fails after
+# $_PS_MITM_DEBUG_PORT_SCAN_TRIES tries.
 _mitm_debug_free_port() {
   local port="$1" tries=0
   while netstat -an -p tcp | grep -qE "[.*]\.${port}\b.*LISTEN"; do
     port=$((port + 1))
     tries=$((tries + 1))
-    if [ "$tries" -ge 20 ]; then
+    if [ "$tries" -ge "$_PS_MITM_DEBUG_PORT_SCAN_TRIES" ]; then
       echo "mitm-debug-run: no free port found near $1" >&2
       return 1
     fi
@@ -157,7 +169,7 @@ _mitm_debug_free_port() {
 }
 
 mitm-debug-run() {
-  local requested_port="${1:-38080}"
+  local requested_port="${1:-$PS_MITM_DEBUG_DEFAULT_PORT}"
 
   if [ -f "$_PS_MITM_DEBUG_PIDFILE" ]; then
     local running_pid; running_pid="$(cat "$_PS_MITM_DEBUG_PIDFILE")"
@@ -178,13 +190,13 @@ mitm-debug-run() {
   _mitm_debug_ensure_config "$port"
 
   local cert_is_new=0
-  [ -f "$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem" ] || cert_is_new=1
+  [ -f "$_PS_MITM_DEBUG_CA_CERT" ] || cert_is_new=1
 
   ( cd "$_PS_MITM_DEBUG_CHECKOUT" \
     && PS_CONFIG_FILE_PATH="$_PS_MITM_DEBUG_CONFIG" \
        PS_MITM_CAPTURE_PATH="$_PS_MITM_DEBUG_CAPTURE" \
        PS_PROXY_CERT_DIR="$_PS_MITM_DEBUG_CERTDIR" \
-       "$pybin" debug_traffic_run.py \
+       "$pybin" "$_PS_MITM_DEBUG_ENTRYPOINT" \
   ) >"$_PS_MITM_DEBUG_LOGFILE" 2>&1 &
   local mpid=$!
   echo "$mpid" > "$_PS_MITM_DEBUG_PIDFILE"
@@ -204,9 +216,9 @@ mitm-debug-run() {
   # and re-run separately.
   if [ "$cert_is_new" = 1 ]; then
     sleep 1
-    if [ -f "$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem" ]; then
+    if [ -f "$_PS_MITM_DEBUG_CA_CERT" ]; then
       echo "mitm-debug: trusting freshly generated dev CA (sudo needed) ..."
-      sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$_PS_MITM_DEBUG_CERTDIR/mitmproxy-ca-cert.pem"
+      sudo security add-trusted-cert -d -r trustRoot -k "$_PS_MITM_DEBUG_SYSTEM_KEYCHAIN" "$_PS_MITM_DEBUG_CA_CERT"
     fi
   fi
 
@@ -218,7 +230,7 @@ mitm-debug-run() {
   # this is exactly what a real client app will see. Only flip the system
   # proxy on if it actually succeeds, so a broken/untrusted proxy never gets
   # a chance to take down the whole Mac's internet.
-  if curl -x "http://127.0.0.1:${port}" -sS -o /dev/null -m 5 -w "" https://www.google.com/ 2>/dev/null; then
+  if curl -x "http://127.0.0.1:${port}" -sS -o /dev/null -m 5 -w "" "$_PS_MITM_DEBUG_SELFTEST_URL" 2>/dev/null; then
     mitm-debug-proxy-on "$port"
     echo "  view with: mitm-watch.py \"$_PS_MITM_DEBUG_CAPTURE\""
     echo "  when done: mitm-debug-stop  (also disables the system proxy)"
