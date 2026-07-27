@@ -12,9 +12,11 @@
 #   mitm-debug-sync                # (rarely needed directly - run does this)
 #   mitm-debug-proxy-on / -off     # (rarely needed directly - run/stop do this)
 #
-# debug-traffic is a personal/local-only branch on the ps-agent repo (never a
-# PR branch) - mitm-debug-run always pulls the latest commit on it before
-# starting, so just push more commits to update it.
+# $PS_MITM_DEBUG_BRANCH (default: debug-traffic) is meant to be YOUR OWN
+# personal/local-only branch on the ps-agent repo (never a PR branch) - set
+# it in your shell profile to whatever you call yours. mitm-debug-run always
+# pulls the latest commit on it before starting, so just push more commits
+# to update it.
 #
 # Capture goes to $PS_MITM_DEBUG_CACHE/mitm_capture.jsonl. View it with:
 #   mitm-watch.py "$PS_MITM_DEBUG_CACHE/mitm_capture.jsonl"
@@ -28,8 +30,9 @@
 
 PS_MITM_DEBUG_CACHE="${PS_MITM_DEBUG_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/dev-env-ps-agent}"
 PS_MITM_DEBUG_NETWORK_SERVICE="${PS_MITM_DEBUG_NETWORK_SERVICE:-Wi-Fi}"
-_PS_MITM_DEBUG_REPO="git@github.com:prompt-security/ps-agent.git"
-_PS_MITM_DEBUG_CHECKOUT="$PS_MITM_DEBUG_CACHE/ps-agent-debug-traffic"
+PS_MITM_DEBUG_BRANCH="${PS_MITM_DEBUG_BRANCH:-debug-traffic}"
+_PS_MITM_DEBUG_REPO="${PS_MITM_DEBUG_REPO:-git@github.com:prompt-security/ps-agent.git}"
+_PS_MITM_DEBUG_CHECKOUT="$PS_MITM_DEBUG_CACHE/ps-agent-${PS_MITM_DEBUG_BRANCH}"
 
 mitm-debug-proxy-on() {
   local port="$1"
@@ -68,12 +71,12 @@ _mitm_debug_python() {
 mitm-debug-sync() {
   mkdir -p "$PS_MITM_DEBUG_CACHE"
   if [ -d "$_PS_MITM_DEBUG_CHECKOUT/.git" ]; then
-    echo "mitm-debug-sync: pulling debug-traffic ..."
-    (cd "$_PS_MITM_DEBUG_CHECKOUT" && git fetch origin debug-traffic \
-      && git checkout -q debug-traffic && git reset --hard origin/debug-traffic)
+    echo "mitm-debug-sync: pulling ${PS_MITM_DEBUG_BRANCH} ..."
+    (cd "$_PS_MITM_DEBUG_CHECKOUT" && git fetch origin "$PS_MITM_DEBUG_BRANCH" \
+      && git checkout -q "$PS_MITM_DEBUG_BRANCH" && git reset --hard "origin/$PS_MITM_DEBUG_BRANCH")
   else
-    echo "mitm-debug-sync: cloning debug-traffic ..."
-    git clone --branch debug-traffic --single-branch "$_PS_MITM_DEBUG_REPO" "$_PS_MITM_DEBUG_CHECKOUT"
+    echo "mitm-debug-sync: cloning ${PS_MITM_DEBUG_BRANCH} ..."
+    git clone --branch "$PS_MITM_DEBUG_BRANCH" --single-branch "$_PS_MITM_DEBUG_REPO" "$_PS_MITM_DEBUG_CHECKOUT"
   fi
 }
 
