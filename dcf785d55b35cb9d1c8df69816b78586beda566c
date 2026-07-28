@@ -1,0 +1,58 @@
+scripts/kg/bin/assemble_relations.py
+  c1ea955e0c7b2d5a 1-81
+scripts/kg/bin/db.py
+  c1ea955e0c7b2d5a 1-22
+scripts/kg/bin/apply_resolution.py
+  c1ea955e0c7b2d5a 1-109
+scripts/kg/bin/serialize_subgraph.py
+  c1ea955e0c7b2d5a 1-77
+scripts/kg/bin/pending_resolution.py
+  c1ea955e0c7b2d5a 1-58
+scripts/kg/bin/load_extraction.py
+  c1ea955e0c7b2d5a 1-71
+scripts/kg/bin/stats.py
+  c1ea955e0c7b2d5a 1-83
+scripts/kg/bin/find_entity.py
+  c1ea955e0c7b2d5a 1-42
+scripts/kg/kg.sh
+  c1ea955e0c7b2d5a 1-177
+scripts/kg/PROMPTS.md
+  c1ea955e0c7b2d5a 1-131
+scripts/kg/bin/schemas.py
+  c1ea955e0c7b2d5a 1-49
+scripts/kg/bin/schema.sql
+  c1ea955e0c7b2d5a 1-70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "dcf785d55b35cb9d1c8df69816b78586beda566c",
+  "prompts": {
+    "c1ea955e0c7b2d5a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "530e2227-ebb2-4b3a-ad12-174fdf94b183",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 980,
+      "total_deletions": 10,
+      "accepted_lines": 970,
+      "overriden_lines": 0
+    },
+    "c8eca29a8746fb60": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d5dbd1d2-4d4e-49e4-bb0a-1b08ab4e9df5",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 90,
+      "total_deletions": 8,
+      "accepted_lines": 82,
+      "overriden_lines": 0
+    }
+  }
+}
