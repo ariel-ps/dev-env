@@ -125,10 +125,19 @@ def pane_screen(win_id: int, extent: str = "screen") -> str:
     return ANSI.sub("", txt)
 
 
-def type_into(win_id: int, text: str) -> None:
+def window_exists(win_id: int) -> bool:
+    return bool(kitty("ls", "--match", f"id:{win_id}", check=False).strip())
+
+
+def type_into(win_id: int, text: str) -> bool:
     """Paste text into a pane and submit it, as a user pressing Enter would.
 
-    Two things matter here, both learned the hard way:
+    Returns whether the pane was still there afterwards. kitty documents that
+    send-text "always succeeds, even if no text was sent to any window", so its
+    exit status proves nothing — a pane closing between resolving the roster and
+    writing to it would otherwise be reported as a successful send.
+
+    Two details of the write itself, both learned the hard way:
 
     --stdin, not `-- text`: with `--`, kitty interprets escapes in the argument,
     so a message containing a Windows path or a literal \\n is silently mangled —
@@ -150,6 +159,10 @@ def type_into(win_id: int, text: str) -> None:
     # so no sleep is needed between them — the guessed delay this replaces was
     # only ever compensating for keystroke-by-keystroke delivery.
     kitty("send-text", "--match", f"id:{win_id}", "--", "\\r", check=False)
+    # Checking the pane still exists is the strongest cheap confirmation available.
+    # Reading the screen back would be stronger but is unreliable: by the time it
+    # could be read the TUI has usually submitted and cleared the input line.
+    return window_exists(win_id)
 
 
 # States in which the pane is NOT sitting at an empty prompt, so typing into it
@@ -731,9 +744,10 @@ def cmd_send(argv: list[str]) -> int:
     Stop hook (`cx drain`) feeds it in as a real turn the moment it finishes.
     """
     force_queue = "--queue" in argv
-    argv = [a for a in argv if a != "--queue"]
+    force = "--force" in argv
+    argv = [a for a in argv if a not in ("--queue", "--force")]
     if len(argv) < 2:
-        die("usage: cx send <slot|name> <message...> [--queue]")
+        die("usage: cx send <slot|name> <message...> [--queue] [--force]")
     target, msg = argv[0], " ".join(argv[1:])
     rows = roster()
     dst = resolve(target, rows)
@@ -753,6 +767,13 @@ def cmd_send(argv: list[str]) -> int:
     if state == "ended":
         die(f"{label} has ended — nothing there to receive the message")
 
+    if not force:
+        ok, n = rate_check(who)
+        if not ok:
+            die(f"{who} has sent {n} messages in the last {SEND_WINDOW // 60} minutes — "
+                f"refusing, in case two sessions are replying to each other in a loop. "
+                f"Use --force if this is deliberate.")
+
     # Queue when asked, when the target is busy, or when it has no pane to type
     # into at all. All three need a session id: without one there is no inbox to
     # queue to and no Stop hook that would drain it.
@@ -765,7 +786,14 @@ def cmd_send(argv: list[str]) -> int:
         return 0
 
     require_pane(dst)
-    type_into(dst["win"], text)
+    if not type_into(dst["win"], text):
+        # The pane went away mid-send. Queue it if there is a session to queue to,
+        # so the message is not lost to a pane that closed a moment too early.
+        if sid:
+            enqueue(sid, who, msg)
+            die(f"{label} (win {dst['win']}) disappeared while sending — "
+                f"queued instead, for delivery if it comes back")
+        die(f"{label} (win {dst['win']}) disappeared while sending — message lost")
     print(f"cx: typed into {label}, win {dst['win']}")
     return 0
 
@@ -1171,6 +1199,51 @@ KEEP_ORPHANED = 24 * 3600
 # wanted even if it does.
 KEEP_QUEUED = 7 * 24 * 3600
 
+# Runaway guard. Two sessions told to reply to each other will do so forever: each
+# drain injects a turn, the turn sends back, the other drain injects again. Nothing
+# in the loop is wrong from either side, so it never terminates on its own, and it
+# spends tokens unattended.
+#
+# The cap is on the SENDING side and counts sends per sender in a rolling window,
+# rather than tracking chain depth through the messages. Depth would need the model
+# to propagate a hop count it has no reason to preserve; a rate limit needs no
+# cooperation and bounds the loop whatever shape it takes. The cost is that a
+# legitimately chatty orchestrator hits it too — hence --force to override, and a
+# window sized well above conversational use.
+MAX_SENDS_PER_WINDOW = 20
+SEND_WINDOW = 300
+RATE_DIR = os.path.join(STATE_DIR, "rate")
+
+
+def rate_check(sender: str) -> tuple[bool, int]:
+    """(allowed, sends_in_window). Records this send when allowed."""
+    os.makedirs(RATE_DIR, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", sender or "unknown")[:64]
+    path = os.path.join(RATE_DIR, f"{safe}.log")
+    now = time.time()
+    stamps = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    ts = float(line.strip())
+                except ValueError:
+                    continue
+                if now - ts < SEND_WINDOW:
+                    stamps.append(ts)
+    except OSError:
+        pass
+    if len(stamps) >= MAX_SENDS_PER_WINDOW:
+        return False, len(stamps)
+    stamps.append(now)
+    try:
+        # Rewrite pruned rather than append, so the file cannot grow without bound.
+        with open(path, "w") as fh:
+            fh.write("\n".join(f"{s:.3f}" for s in stamps) + "\n")
+    except OSError:
+        pass
+    return True, len(stamps)
+
 
 def cmd_gc(argv: list[str]) -> int:
     """Drop stale pane registrations, state records and queued messages.
@@ -1234,6 +1307,20 @@ def cmd_gc(argv: list[str]) -> int:
             except OSError:
                 pass
 
+    # Rate logs are self-pruning per send, but a sender that stops sending leaves
+    # one behind forever.
+    try:
+        for fn in os.listdir(RATE_DIR):
+            p = os.path.join(RATE_DIR, fn)
+            try:
+                if now - os.path.getmtime(p) > SEND_WINDOW * 4:
+                    if not dry:
+                        os.remove(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
     if "--quiet" not in argv:
         prefix = "would drop" if dry else "dropped"
         print(f"cx: {prefix} {len(dropped_panes)} pane registration(s), "
@@ -1247,17 +1334,21 @@ def cmd_help(argv: list[str]) -> int:
     print(
         "\ncommands:\n"
         "  ls [--all] [-q]           roster + live status (--all: non-Claude panes too)\n"
-        "  send <who> <msg...>       type a message into that pane and submit it\n"
+        "  send <who> <msg...>       deliver a message: typed in if the target is at a\n"
+        "                            prompt, queued for its next Stop if it is busy\n"
+        "                            [--queue: always queue] [--force: ignore rate cap]\n"
         "  ask <who> <q> [--timeout S]  ask and block for the answer (default 300s)\n"
         "  answer <req-id> <text>    answer a request you were asked (receiver side)\n"
         "  answers <req-id>          print an answer that arrived after a timeout\n"
         "  inbox                     list requests and whether they're answered\n"
         "  bcast <msg...>            send to every pane but this one\n"
-        "  peek <who> [n] [--all]    print that pane's last n lines (--all: scrollback)\n"
+        "  peek <who> [n] [--sidechain]  print its last n conversation turns\n"
+        "                            [--screen: the raw pane instead] [--all: scrollback]\n"
         "  focus <who>               jump kitty focus there\n"
         "  name <who> <new>          (re)name a pane in the registry\n"
         "  me                        this pane's slot/name/session id\n"
-        "  gc                        forget registry entries for dead panes\n"
+        "  drain                     Stop-hook entry point: deliver queued messages\n"
+        "  gc [-n]                   forget dead panes, old records and stale queues\n"
         "\n<who> is a slot number, a name, a name substring, or w<kitty-window-id>."
     )
     return 0
