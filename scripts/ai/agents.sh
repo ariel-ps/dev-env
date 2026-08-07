@@ -15,13 +15,15 @@ codex-danger() {
 # function via `zsh -lic` (so claude-danger/codex-danger resolve from rc),
 # then apply kitty's grid layout for equal-size panes.
 #
-# Panes are named <label>-1..<label>-N, matching aoe-grid-claude-danger, and each
-# gets its own background colour. <label> defaults to the current directory's name
-# (or "home" in $HOME). Address a pane by name: `cx send bench-3 "..."`.
+# Panes are addressed as NATS-style subjects <label>.1..<label>.N, and each gets
+# its own background colour. <label> defaults to the current directory's name (or
+# "home" in $HOME). Address one pane or the whole grid:
+#   cx send bench.3 "..."      one pane
+#   cx send 'bench.*' "..."    every pane in the grid
 #
 # usage: kitty-grid-claude-danger [count] [label]
-#   kitty-grid-claude-danger            # 9 panes, named <cwd-name>-1..9
-#   kitty-grid-claude-danger 4 bench    # 4 panes, named bench-1..bench-4
+#   kitty-grid-claude-danger            # 9 panes, subjects <cwd-name>.1..9
+#   kitty-grid-claude-danger 4 bench    # 4 panes, subjects bench.1..bench.4
 #   KITTY_GRID_NO_COLOR=1 kitty-grid-claude-danger   # skip the ~2.5s colouring
 #
 # DANGER: every pane runs an unsupervised agent with permission checks
@@ -33,10 +35,10 @@ __kitty_agent_grid() {
   [[ "$want" =~ '^[0-9]+$' ]] \
     || { echo "kitty-grid-${cmd}: count must be a number, got: $want" >&2; return 1; }
 
-  # Panes are identified as <label>-<i>, matching aoe-grid-claude-danger. Default
-  # to the cwd's name so a grid reads like the directory it works on — except in
-  # $HOME, where that is the username: long, repeated N times, and saying nothing
-  # about what the grid is for.
+  # The label is the middle token of every pane's subject. Default to the cwd's
+  # name so a grid reads like the directory it works on — except in $HOME, where
+  # that is the username: long, repeated N times, and saying nothing about what the
+  # grid is for.
   if [[ -z "$label" ]]; then
     if [[ "$PWD" == "$HOME" ]]; then
       label=home
@@ -64,30 +66,30 @@ __kitty_agent_grid() {
   # shell never sources. The agent then starts fine (claude is in ~/.local/bin)
   # but every node-based hook inside it dies with "node: command not found",
   # silently disabling those plugins for the whole session.
-  # Each pane is told its own name at launch via CX_NAME, which both the agent
-  # hooks read back:
-  #   cx register uses it instead of guessing from cwd — which labels every pane of
-  #     a grid identically (the cwd is shared) and then separates them by a name
-  #     collision counter that has nothing to do with the pane number.
-  #   kitty-agent-title uses it as the title, so `cx ls` and the tab bar show the
-  #     same string rather than two names for one pane.
-  # KITTY_AGENT_TITLE_PREFIX is set for the case where CX_NAME is absent; the name
-  # already ends in the pane number, so the title needs no separate one.
+  # Each pane is told its subject at launch, as a label plus its own index, which
+  # both agent hooks read back:
+  #   cx register builds <host>.<label>.<index> from them instead of guessing from
+  #     cwd — which labels every pane of a grid identically (the cwd is shared) and
+  #     then separates them by a name collision counter unrelated to the pane.
+  #   kitty-agent-title titles the pane with the same subject, so `cx ls` and the
+  #     tab bar show one string rather than two names for one pane.
+  # KITTY_AGENT_TITLE_PREFIX only applies when no CX_NAME is set; with a subject the
+  # index is already in the name.
   #
   # NOT the cx slot. Slots are unique across every session on the machine, pane
-  # numbers only within their grid, so pane 2 wants slot 2 while an unrelated
+  # indexes only within their grid, so pane 2 wants slot 2 while an unrelated
   # session already holds it — they cannot be made to agree. Address grid panes by
-  # name (`cx send <label>-2`); the slot is just a short integer for typing.
+  # subject (`cx send <label>.2`); the slot is just a short integer for typing.
   local first_id
   first_id=$(kitty @ launch --type=tab --tab-title="$label" --cwd=current \
-    --env "KITTY_AGENT_TITLE_PREFIX=1" --env "CX_NAME=${label}-1" \
+    --env "KITTY_AGENT_TITLE_PREFIX=1" --env "CX_NAME=${label}" --env "CX_INDEX=1" \
     -- zsh -lic "$cmd") \
     || { echo "kitty-grid-${cmd}: failed to launch tab" >&2; return 1; }
 
   local -i i
   for ((i = 2; i <= want; i++)); do
     kitty @ launch --match "id:$first_id" --cwd=current \
-      --env "KITTY_AGENT_TITLE_PREFIX=$i" --env "CX_NAME=${label}-$i" \
+      --env "KITTY_AGENT_TITLE_PREFIX=$i" --env "CX_NAME=${label}" --env "CX_INDEX=$i" \
       -- zsh -lic "$cmd" >/dev/null
   done
 
@@ -113,7 +115,7 @@ print(data[0]["tabs"][0]["id"]) if data else sys.exit(1)
     [[ -n "$tab_id" ]] && kitty-colorize-panes "$tab_id" >/dev/null 2>&1
   fi
 
-  echo "kitty-grid-${cmd}: ${want}x ${cmd}, named ${label}-1..${label}-${want}, new tab, grid layout"
+  echo "kitty-grid-${cmd}: ${want}x ${cmd}, subjects ${label}.1..${label}.${want}, new tab, grid layout"
 }
 
 kitty-grid-claude-danger() { __kitty_agent_grid claude-danger "${1:-9}" "${2:-}"; }

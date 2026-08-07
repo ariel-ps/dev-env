@@ -7,7 +7,10 @@
 # otherwise indistinguishable once one is maximised.
 #
 # Name resolution, first hit wins:
-#   CX_NAME              — set at launch by kitty-grid (`--env CX_NAME=<label>-<i>`)
+#   CX_NAME + CX_INDEX   — set at launch by kitty-grid; combined into the pane's
+#                          subject (<label>.<index>). CX_NAME alone is the LABEL,
+#                          shared by every pane of a grid, so it must not be used
+#                          on its own — all nine panes would show one badge.
 #   the cx registry      — for panes that named themselves via `cx register`
 #   the cwd's basename    — plain fallback
 #
@@ -31,11 +34,13 @@ field() {
 model="$(field display_name)"
 cwd="$(field current_dir)"
 
-name="${CX_NAME:-}"
+name=""
+[ -n "${CX_NAME:-}" ] && name="${CX_NAME}.${CX_INDEX:-1}"
 
-# Fall back to whatever this pane called itself when it registered. Grepping the
-# record beats invoking cx.py: a statusline runs on every redraw, so a Python
-# start-up per frame is too expensive to justify.
+# Fall back to whatever this pane called itself when it registered — its `name`
+# field is already the host-less subject. Grepping the record beats invoking cx.py:
+# a statusline runs on every redraw, so a Python start-up per frame is too
+# expensive to justify.
 if [ -z "$name" ] && [ -n "${KITTY_WINDOW_ID:-}" ]; then
   rec="${CX_STATE_DIR:-$HOME/.claude/cx}/panes/${KITTY_WINDOW_ID}.json"
   [ -r "$rec" ] && name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$rec" | head -1)"

@@ -107,14 +107,17 @@ case "$AGENT" in
   *) WHO="$AGENT" ;;
 esac
 
-# CX_NAME is what a launcher already decided this pane is called, and it is the
-# name `cx ls` shows. Prefer it over the cwd's basename so the title and the name
-# are the same identity — otherwise a grid pane is "home-1" to cx and
-# "1 C ariel.zilbershteyin" in the tab bar, which is two names for one pane.
-# It already ends in the pane number, so KITTY_AGENT_TITLE_PREFIX is redundant
-# here and only applies when no CX_NAME was given.
+# Show the pane's cx subject when a launcher gave it one, so the tab bar and
+# `cx ls` name the pane identically — otherwise a grid pane is "fin.2" to cx and
+# "2 C ariel.zilbershteyin" in the tab bar, two names for one pane. The host token
+# is omitted here: every pane in this tab bar is on this host, so it would be the
+# same noise on every title.
+#
+# CX_INDEX is normally set alongside CX_NAME by the launcher. Falling back to
+# KITTY_AGENT_TITLE_PREFIX and then 1 keeps the title well-formed for a pane that
+# was given a label but no index.
 if [ -n "${CX_NAME:-}" ]; then
-  LABEL="$WHO ${CX_NAME}"
+  LABEL="$WHO ${CX_NAME}.${CX_INDEX:-${KITTY_AGENT_TITLE_PREFIX:-1}}"
 else
   LABEL="$WHO $REPO"
   [ -n "${KITTY_AGENT_TITLE_PREFIX:-}" ] && LABEL="${KITTY_AGENT_TITLE_PREFIX} $LABEL"

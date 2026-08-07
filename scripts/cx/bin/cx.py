@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 """cx — cross-Claude session comms over kitty remote control.
 
-Gives every Claude Code session in a kitty pane a stable, human-sized id
-(slot number + name) so one Claude can be told to talk to another:
+Gives every Claude Code session in a kitty pane an addressable name, so one
+Claude can be told to talk to another — or to a whole grid at once:
 
-    cx ls                      # roster with live status
-    cx send 3 "rebase onto main"
-    cx peek 3                  # read pane 3's screen
-    cx focus 3
+    cx ls                          # roster with live status
+    cx ls 'build.*'                # just that grid
+    cx send build.3 "rebase onto main"
+    cx send 'build.*' "pull main"   # every pane in the grid
+    cx peek build.3                 # read its conversation
+    cx focus build.3
 
 Identity model
 --------------
+Panes are named as NATS subjects, coarse to fine:
+
+    <host>.<label>.<index>      mpcqpq6qlm.build.3
+    <label>.<index>             build.3     (same pane, from its own host)
+
+`*` matches one token and `>` matches the rest, exactly as in NATS, so
+`build.*` is one grid, `*.1` is the first pane of every grid, and `>` is
+everything. NATS ordering rather than DNS's because these strings become real
+NATS subjects when delivery goes cross-machine, and reversing them then would
+mean two orderings for one identity.
+
 One Claude per kitty pane, so the kitty *window id* is the durable key. A
 SessionStart hook (cx-register) drops a JSON file per pane under
-$CX_STATE_DIR/panes/<kitty_window_id>.json holding the Claude session_id,
-cwd and a slot number. Registration is best-effort: panes with no registry
-file still show up in `cx ls`, discovered from kitty's process table, they
-just lack a session_id. Nothing here depends on the hook being installed.
+$CX_STATE_DIR/panes/<kitty_window_id>.json holding the subject, the Claude
+session_id, cwd and a slot number. The slot is only a short integer to type;
+it is unique per machine and so cannot line up with a per-grid index.
+Registration is best-effort: panes with no registry file still show up in
+`cx ls`, discovered from kitty's process table, they just lack a session_id.
+Nothing here depends on the hook being installed.
 
 Status
 ------
@@ -72,6 +87,82 @@ WAITING_MARKERS = (
 )
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+# --------------------------------------------------------------------------
+# subjects
+# --------------------------------------------------------------------------
+# Panes are named as NATS subjects: <host>.<label>.<index>, coarse to fine.
+#
+#   mpcqpq6qlm.fin.2      a pane, fully qualified
+#   fin.2                 the same pane, written from its own host
+#
+# Coarse-to-fine (NATS) rather than fine-to-coarse (DNS) because these strings
+# become real NATS subjects when delivery goes cross-machine — cx.<host>.<label>.
+# <index>.inbox — and reversing them at that point would mean two orderings for
+# one identity.
+#
+# Depth is always three tokens, including for a lone pane that is not part of a
+# grid, so `*` means the same thing at every position and `fin.*` cannot
+# accidentally match a differently-shaped name.
+
+def host_token() -> str:
+    h = os.environ.get("CX_HOST") or ""
+    if not h:
+        try:
+            h = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip()
+        except OSError:
+            h = ""
+    return token(h or "unknown")
+
+
+def token(s: str) -> str:
+    """Sanitise one subject token. Dots separate tokens, so they cannot occur."""
+    return re.sub(r"[^a-z0-9_-]+", "-", (s or "").strip().lower()).strip("-") or "x"
+
+
+def subject_of(label: str, index: int, host: str = "") -> str:
+    return f"{host or host_token()}.{token(label)}.{index}"
+
+
+def short_subject(subject: str) -> str:
+    """Drop the host token when it is this machine's, for display and typing."""
+    parts = subject.split(".", 1)
+    if len(parts) == 2 and parts[0] == host_token():
+        return parts[1]
+    return subject
+
+
+def subject_re(pattern: str) -> re.Pattern:
+    """Compile a NATS-style subject pattern.
+
+    `*` matches exactly one token, `>` matches one or more trailing tokens — the
+    same meanings NATS gives them, so a pattern that works here works there.
+    """
+    out = []
+    parts = pattern.split(".")
+    for i, p in enumerate(parts):
+        if p == ">":
+            if i != len(parts) - 1:
+                die("'>' may only appear as the last token of a subject pattern")
+            out.append(r".+")
+            break
+        out.append(r"[^.]+" if p == "*" else re.escape(p))
+    return re.compile(r"^" + r"\.".join(out) + r"$")
+
+
+def subject_matches(pattern: str, subject: str) -> bool:
+    """Match a pattern against a subject, with or without its host token.
+
+    Both forms are tried so `fin.*` works from the pane's own host without having
+    to spell the hostname, while `mpcqpq6qlm.fin.*` still addresses it explicitly.
+    """
+    rx = subject_re(pattern)
+    return bool(rx.match(subject) or rx.match(short_subject(subject)))
+
+
+def is_pattern(s: str) -> bool:
+    return "*" in s or ">" in s
 
 
 def trunc(s: str, width: int, left: bool = False) -> str:
@@ -422,6 +513,54 @@ def transcript_last_line(path: str) -> str:
     return ""
 
 
+class registry_lock:
+    """Serialise the read-modify-write in cmd_register.
+
+    Choosing a slot means reading every existing record and picking a free number.
+    A grid registers all its panes at once, so without this they all read the same
+    snapshot and all pick the same slot — observed giving three panes slot 1, which
+    makes `cx send 1` ambiguous.
+
+    O_EXCL creation is the lock: it is atomic on every filesystem that matters here,
+    needs no library, and leaves a file whose mtime says when it was taken so a
+    crashed holder cannot wedge registration forever.
+    """
+
+    def __init__(self, timeout: float = 2.0):
+        self.path = os.path.join(STATE_DIR, "register.lock")
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        os.makedirs(STATE_DIR, exist_ok=True)
+        deadline = time.time() + self.timeout
+        while True:
+            try:
+                self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(self.path) > 10:
+                        os.unlink(self.path)  # stale: holder died mid-registration
+                        continue
+                except OSError:
+                    pass
+                if time.time() > deadline:
+                    # Registration must never block a session from starting, so give
+                    # up and proceed unlocked rather than fail the hook.
+                    return self
+                time.sleep(0.02)
+
+    def __exit__(self, *exc):
+        if self.fd is not None:
+            os.close(self.fd)
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        return False
+
+
 def write_record(rec: dict) -> None:
     os.makedirs(PANES_DIR, exist_ok=True)
     path = os.path.join(PANES_DIR, f"{rec['kitty_window_id']}.json")
@@ -523,6 +662,7 @@ def roster(claude_only: bool = True) -> list[dict]:
                         # kitty-agent-title stamps titles with state emoji, which
                         # read badly in a NAME column and change every few seconds.
                         "name": (rec or {}).get("name") or (st or {}).get("repo") or "",
+                        "subject": (rec or {}).get("subject") or (st or {}).get("subject") or "",
                         "slot": (rec or {}).get("slot"),
                         "session_id": session_id,
                         "registered": rec is not None,
@@ -560,6 +700,7 @@ def roster(claude_only: bool = True) -> list[dict]:
                 "registered": False,
                 "self": False,
                 "detached": True,
+                "subject": st.get("subject") or "",
             }
         )
     # Stable ordering: registered slots first in slot order, then kitty order.
@@ -629,11 +770,43 @@ def status_of(win_id: int, session_id: str = "") -> tuple[str, str]:
     return "idle", last
 
 
-def resolve(who: str, rows: list[dict] | None = None) -> dict:
-    """Resolve a slot number, name, or kitty win id (w<N>) to one roster row."""
+def self_label(rows: list[dict] | None = None) -> str:
+    """How this pane names itself when sending. Its subject if it has one."""
+    me = self_row(rows)
+    if not me:
+        return "cx"
+    return short_subject(me.get("subject") or "") or me["name"] or f"slot{me['slot']}"
+
+
+def resolve_all(who: str, rows: list[dict] | None = None) -> list[dict]:
+    """Every roster row addressed by `who`, which may be a subject pattern.
+
+    Patterns (`fin.*`, `>`) are what makes a group addressable without a separate
+    broadcast command; everything else resolves to at most one row, as before.
+    """
     rows = rows if rows is not None else roster()
     if not rows:
         die("no Claude panes found (is remote control on, and are the panes running claude?)")
+    if is_pattern(who):
+        hits = [r for r in rows if r.get("subject") and subject_matches(who, r["subject"])]
+        if not hits:
+            die(f"no pane matching subject pattern '{who}' (see `cx ls`)")
+        return hits
+    return [resolve(who, rows)]
+
+
+def resolve(who: str, rows: list[dict] | None = None) -> dict:
+    """Resolve a slot number, subject, name, or kitty win id (w<N>) to one row."""
+    rows = rows if rows is not None else roster()
+    if not rows:
+        die("no Claude panes found (is remote control on, and are the panes running claude?)")
+    if is_pattern(who):
+        hits = resolve_all(who, rows)
+        if len(hits) > 1:
+            names = ", ".join(short_subject(h.get("subject") or "") or h["name"] for h in hits)
+            die(f"'{who}' matches {len(hits)} panes ({names}) — "
+                f"that is allowed for send, not for this command")
+        return hits[0]
     if who.startswith("w") and who[1:].isdigit():
         for r in rows:
             if r["win"] == int(who[1:]):
@@ -644,6 +817,12 @@ def resolve(who: str, rows: list[dict] | None = None) -> dict:
             if r["slot"] == int(who):
                 return r
         die(f"no pane in slot {who} (see `cx ls`)")
+    # Exact subject, in either the full or host-less form, before any fuzzy match:
+    # a subject is a precise address and must never be treated as a substring.
+    for r in rows:
+        subj = r.get("subject") or ""
+        if subj and who in (subj, short_subject(subj)):
+            return r
     hits = [r for r in rows if r["name"] == who]
     if not hits:
         hits = [r for r in rows if who.lower() in r["name"].lower()]
@@ -699,16 +878,25 @@ def self_row(rows: list[dict] | None = None) -> dict | None:
 def cmd_ls(argv: list[str]) -> int:
     show_all = "--all" in argv
     quiet = "-q" in argv or "--quiet" in argv
+    pattern = next((a for a in argv if not a.startswith("-")), "")
     rows = roster(claude_only=not show_all)
+    if pattern:
+        # Accept a subject pattern so a grid can be listed on its own: `cx ls 'fin.*'`.
+        rows = [r for r in rows
+                if r.get("subject") and subject_matches(pattern, r["subject"])]
+        if not rows:
+            print(f"cx: no pane matching '{pattern}'", file=sys.stderr)
+            return 1
     if not rows:
         print("cx: no Claude panes found", file=sys.stderr)
         return 1
     me = self_row(rows)
     if quiet:
         for r in rows:
-            print(f"{r['slot']}\t{r['name'] or r['title']}\t{r['win']}\t{r['cwd']}")
+            subj = short_subject(r.get("subject") or "") or r["name"] or r["title"]
+            print(f"{r['slot']}\t{subj}\t{r['win']}\t{r['cwd']}")
         return 0
-    print(f"{'':2}{'SLOT':>4}  {'NAME':<22} {'WIN':>4} {'STATUS':<8} {'CWD':<24} LAST")
+    print(f"{'':2}{'SLOT':>4}  {'SUBJECT':<22} {'WIN':>4} {'STATUS':<8} {'CWD':<24} LAST")
     for r in rows:
         st, last = status_of(r["win"], r.get("session_id", ""))
         # status_of returns "<event> <age> ago" for record-backed rows; the
@@ -720,7 +908,10 @@ def cmd_ls(argv: list[str]) -> int:
                 last = from_transcript
         mark = "*" if me and r["win"] == me["win"] else " "
         cwd = r["cwd"].replace(os.path.expanduser("~"), "~")
-        name = (r["name"] or r["title"] or "-") + ("" if r["registered"] else "~")
+        # Show the subject, host token dropped when local; fall back to the old
+        # name or the pane title for anything not registered under one.
+        subj = short_subject(r.get("subject") or "")
+        name = (subj or r["name"] or r["title"] or "-") + ("" if r["registered"] else "~")
         if r.get("detached"):
             name += "@"
         win = str(r["win"]) if r["win"] else "-"
@@ -750,11 +941,38 @@ def cmd_send(argv: list[str]) -> int:
         die("usage: cx send <slot|name> <message...> [--queue] [--force]")
     target, msg = argv[0], " ".join(argv[1:])
     rows = roster()
+
+    # A subject pattern addresses a group, so one send fans out over the matches.
+    # This is what `bcast` was for, except addressable: `fin.*` is one grid, `>` is
+    # everything, and the sender is always excluded so a fan-out cannot feed itself.
+    if is_pattern(target):
+        me_row = self_row(rows)
+        hits = [r for r in resolve_all(target, rows)
+                if not (me_row and r["win"] and r["win"] == me_row["win"])]
+        if not hits:
+            die(f"'{target}' matched only this pane — nothing to send to")
+        # One rate check for the whole fan-out, then --force on each leg. Counting
+        # each leg separately would spend a 9-pane grid's worth of allowance on a
+        # single `cx send 'grid.*'`, so two of them would trip the runaway guard.
+        who_me = self_label(rows)
+        if not force:
+            ok, n = rate_check(who_me)
+            if not ok:
+                die(f"{who_me} has sent {n} messages in the last {SEND_WINDOW // 60} "
+                    f"minutes — refusing, in case two sessions are replying to each "
+                    f"other in a loop. Use --force if this is deliberate.")
+        rc = 0
+        for r in hits:
+            subj = short_subject(r.get("subject") or "") or r["name"]
+            rc |= cmd_send([subj, msg, "--force"] + (["--queue"] if force_queue else []))
+        print(f"cx: sent to {len(hits)} pane(s) matching '{target}'")
+        return rc
+
     dst = resolve(target, rows)
     me = self_row(rows)
     if me and dst["win"] and dst["win"] == me["win"]:
         die("refusing to send to this same pane")
-    who = (me["name"] or f"slot{me['slot']}") if me else "cx"
+    who = self_label(rows)
     # No brackets in the prefix: if the target pane happens to be a bare shell
     # rather than a Claude TUI, `[cx ...]` is a zsh glob and the line dies with
     # "bad pattern" instead of showing up.
@@ -1129,6 +1347,14 @@ def cmd_register(argv: list[str]) -> int:
     if not (wid and wid.isdigit()):
         return 0  # not in kitty; nothing to register against
     wid_i = int(wid)
+    # Everything from here to write_record is a read-modify-write over the shared
+    # registry, so it is done under the lock: concurrent grid registrations
+    # otherwise read one snapshot and pick the same slot and index.
+    with registry_lock():
+        return _register_locked(wid_i, payload)
+
+
+def _register_locked(wid_i: int, payload: dict) -> int:
     reg = registry()
     rec = reg.get(wid_i, {})
     cwd = payload.get("cwd") or os.getcwd()
@@ -1149,26 +1375,31 @@ def cmd_register(argv: list[str]) -> int:
         slot = next(i for i in range(1, 1000) if i not in used)
     name = rec.get("name")
     if not name:
-        # A launcher that already knows what this pane is says so via CX_NAME
-        # (kitty-grid passes `--env CX_NAME=<label>-<i>`). Preferred over guessing
-        # from cwd, which names every pane of a grid launched in $HOME the same
-        # thing and then separates them by a collision counter — so the suffix
-        # ends up counting name clashes rather than panes, and never lines up with
-        # the pane number the grid actually shows.
-        base = os.environ.get("CX_NAME", "").strip()
-        if base:
-            base = re.sub(r"[^A-Za-z0-9_.-]+", "-", base)[:40]
+        # The label names the group this pane belongs to: a launcher supplies it
+        # via CX_NAME (kitty-grid passes the grid's label), otherwise it is the
+        # cwd's basename. The index distinguishes panes within that label —
+        # CX_INDEX when the launcher numbered them, otherwise the lowest free
+        # index for this label so a lone pane still gets a well-formed subject.
+        label = token(os.environ.get("CX_NAME", "").strip()
+                      or os.path.basename(cwd.rstrip("/")) or "session")[:40]
+        taken = {
+            r.get("subject") for w, r in reg.items() if w != wid_i and r.get("subject")
+        }
+        want = os.environ.get("CX_INDEX", "")
+        if want.isdigit() and subject_of(label, int(want)) not in taken:
+            index = int(want)
         else:
-            base = re.sub(r"[^A-Za-z0-9_.-]+", "-", os.path.basename(cwd.rstrip("/")) or "session")
-        taken = {r.get("name") for w, r in reg.items() if w != wid_i}
-        name, n = base, 2
-        while name in taken:
-            name, n = f"{base}-{n}", n + 1
+            index = next(i for i in range(1, 10000) if subject_of(label, i) not in taken)
+        subject = subject_of(label, index)
+        name = short_subject(subject)
+    else:
+        subject = rec.get("subject") or subject_of(name, 1)
     write_record(
         {
             "kitty_window_id": wid_i,
             "slot": slot,
             "name": name,
+            "subject": subject,
             "session_id": payload.get("session_id", ""),
             "transcript": payload.get("transcript_path", ""),
             "cwd": cwd,
@@ -1347,7 +1578,7 @@ def cmd_help(argv: list[str]) -> int:
     print(__doc__.strip())
     print(
         "\ncommands:\n"
-        "  ls [--all] [-q]           roster + live status (--all: non-Claude panes too)\n"
+        "  ls [pattern] [--all] [-q]  roster + live status (pattern: e.g. 'build.*')\n"
         "  send <who> <msg...>       deliver a message: typed in if the target is at a\n"
         "                            prompt, queued for its next Stop if it is busy\n"
         "                            [--queue: always queue] [--force: ignore rate cap]\n"
@@ -1363,7 +1594,9 @@ def cmd_help(argv: list[str]) -> int:
         "  me                        this pane's slot/name/session id\n"
         "  drain                     Stop-hook entry point: deliver queued messages\n"
         "  gc [-n]                   forget dead panes, old records and stale queues\n"
-        "\n<who> is a slot number, a name, a name substring, or w<kitty-window-id>."
+        "\n<who> is a subject (build.3), a subject pattern (build.*, *.1, >),\n"
+        "a slot number, a name substring, or w<kitty-window-id>.\n"
+        "A pattern sends to every match at once and always excludes this pane."
     )
     return 0
 
