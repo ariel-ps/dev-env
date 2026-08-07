@@ -1234,6 +1234,47 @@ def cmd_ls(argv: list[str]) -> int:
     return 0
 
 
+def guard_send(rows: list[dict], dst: dict, label: str, force: bool) -> None:
+    """Every check that must pass before one session may message another.
+
+    Factored out because `cx ask` had its own delivery path and so was subject to
+    none of them: under policy 'down' a sibling `cx send` was refused while the same
+    pair's `cx ask` returned 0, which made the policy and the loop guards optional
+    for anyone who reached for ask. Any future path that delivers to a pane belongs
+    here too.
+
+    Dies on refusal; returns None when the send may proceed.
+    """
+    if force:
+        return
+    me_row = self_row(rows) or {}
+    me_subj = me_row.get("subject") or ""
+    dst_subj = dst.get("subject") or ""
+
+    ok, why = hierarchy_check(
+        me_subj, dst_subj, replying=has_open_request(dst_subj, me_subj)
+    )
+    if not ok:
+        die(f"refusing to send to {label}: {why}. "
+            f"Use --force to override, or set CX_POLICY (see `cx policy`).")
+
+    me_id, dst_id = chain_id(me_row), chain_id(dst)
+    chain = read_cause(me_row.get("session_id") or "") + ([me_id] if me_id else [])
+    ok, why = chain_check(chain, dst_id)
+    if not ok:
+        die(f"refusing to send to {label}: {why}. Use --force to override.")
+
+    who = self_label(rows)
+    ok, n = rate_check(who)
+    if not ok:
+        die(f"{who} has sent {n} messages in the last {SEND_WINDOW // 60} minutes — "
+            f"refusing, in case two sessions are replying to each other in a loop. "
+            f"Use --force if this is deliberate.")
+
+    record_send(me_subj, dst_subj)
+    write_cause(dst.get("session_id") or "", chain)
+
+
 def cmd_send(argv: list[str]) -> int:
     """Deliver a message to another session, typing it or queueing it.
 
@@ -1324,37 +1365,7 @@ def cmd_send(argv: list[str]) -> int:
     if state == "ended":
         die(f"{label} has ended — nothing there to receive the message")
 
-    # Hierarchy comes before the rate cap: a refused direction is a policy error to
-    # report, not traffic to meter.
-    if not force:
-        me_subj = (self_row(rows) or {}).get("subject") or ""
-        dst_subj = dst.get("subject") or ""
-        # An upward message counts as a reply when the target has an unanswered
-        # request outstanding to this session.
-        ok, why = hierarchy_check(
-            me_subj, dst_subj, replying=has_open_request(dst_subj, me_subj)
-        )
-        if not ok:
-            die(f"refusing to send to {label}: {why}. "
-                f"Use --force to override, or set CX_POLICY (see `cx policy`).")
-        # Cycle detection is independent of the hierarchy: it catches rings of any
-        # length, including between panes the policy would otherwise permit.
-        me_row = self_row(rows) or {}
-        my_sid = me_row.get("session_id") or ""
-        me_id, dst_id = chain_id(me_row), chain_id(dst)
-        chain = read_cause(my_sid) + ([me_id] if me_id else [])
-        ok, why = chain_check(chain, dst_id)
-        if not ok:
-            die(f"refusing to send to {label}: {why}. Use --force to override.")
-        record_send(me_subj, dst_subj)
-        write_cause(sid, chain)
-
-    if not force:
-        ok, n = rate_check(who)
-        if not ok:
-            die(f"{who} has sent {n} messages in the last {SEND_WINDOW // 60} minutes — "
-                f"refusing, in case two sessions are replying to each other in a loop. "
-                f"Use --force if this is deliberate.")
+    guard_send(rows, dst, label, force)
 
     # An explicit --queue, or no pane to type into, is decided here. Everything
     # else goes through deliver(), which re-checks busy-ness INSIDE the pane's send
@@ -1466,14 +1477,20 @@ def cmd_ask(argv: list[str]) -> int:
             die("--timeout wants seconds, e.g. --timeout 120")
         del argv[i : i + 2]
     if len(argv) < 2:
-        die('usage: cx ask <slot|name> "<question>" [--timeout SECS]')
+        die('usage: cx ask <slot|name> "<question>" [--timeout SECS] [--force]')
 
-    target, question = argv[0], " ".join(argv[1:])
+    target = argv[0]
+    question = " ".join(a for a in argv[1:] if a != "--force")
     rows = roster()
     dst = require_pane(resolve(target, rows))
     me = self_row(rows)
     if me and dst["win"] == me["win"]:
         die("refusing to ask this same pane")
+
+    # Same gauntlet as cx send. Without this, ask was a way around the policy and
+    # the loop guards entirely.
+    force = "--force" in argv
+    guard_send(rows, dst, f"slot {dst['slot']} ({dst['name'] or dst['title']})", force)
 
     os.makedirs(MAIL_DIR, exist_ok=True)
     req_id = f"{int(time.time())}-{os.getpid()}"
