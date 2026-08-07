@@ -1221,7 +1221,10 @@ def cmd_ls(argv: list[str]) -> int:
             subj = short_subject(r.get("subject") or "") or r["name"] or r["title"]
             print(f"{r['slot']}\t{subj}\t{r['win']}\t{r['cwd']}")
         return 0
-    print(f"{'':2}{'SLOT':>4}  {'SUBJECT':<22} {'WIN':>4} {'STATUS':<8} {'CWD':<24} LAST")
+    # AGE answers "which of these win.N grids is the old one?" — the reason a date
+    # in the subject was considered, without putting it in every address.
+    print(f"{'':2}{'SLOT':>4}  {'SUBJECT':<22} {'WIN':>4} {'STATUS':<8} {'AGE':>4} "
+          f"{'CWD':<20} LAST")
     for r in rows:
         st, last = status_of(r["win"], r.get("session_id", ""))
         # status_of returns "<event> <age> ago" for record-backed rows; the
@@ -1240,9 +1243,11 @@ def cmd_ls(argv: list[str]) -> int:
         if r.get("detached"):
             name += "@"
         win = str(r["win"]) if r["win"] else "-"
+        started = (registry().get(r["win"], {}) or {}).get("started") or 0
+        age = human_age(time.time() - started) if started else "-"
         print(
-            f"{mark:2}{r['slot']:>4}  {trunc(name, 22):<22} {win:>4} {st:<8} "
-            f"{trunc(cwd, 24, left=True):<24} {trunc(last, 44)}"
+            f"{mark:2}{r['slot']:>4}  {trunc(name, 22):<22} {win:>4} {st:<8} {age:>4} "
+            f"{trunc(cwd, 20, left=True):<20} {trunc(last, 40)}"
         )
     print(
         "\n  * = this pane   ~ = unregistered (run cx-install-hooks so panes self-name)"
@@ -1901,9 +1906,22 @@ def _register_locked(wid_i: int, payload: dict) -> int:
             r.get("subject") for w, r in reg.items() if w != wid_i and r.get("subject")
         }
         want = os.environ.get("CX_INDEX", "")
-        if want.isdigit() and subject_of(label, int(want)) not in taken:
+        if want.isdigit():
+            # A launcher numbered this pane, so that number is what its title shows
+            # and what the operator counts along the grid. If it is taken, the index
+            # must NOT slide — relaunching a grid called `win` while the first was
+            # alive produced win.4, win.5, win.6, whose panes call themselves 1, 2
+            # and 3. The LABEL moves instead: the second grid becomes win2, so every
+            # pane keeps the index its position claims.
             index = int(want)
+            if subject_of(label, index) in taken:
+                base, n = label, 2
+                while subject_of(f"{base}{n}", index) in taken:
+                    n += 1
+                label = f"{base}{n}"
         else:
+            # No launcher numbering, so nothing depends on the index: take the
+            # lowest free one under this label.
             index = next(i for i in range(1, 10000) if subject_of(label, i) not in taken)
         subject = subject_of(label, index)
         name = short_subject(subject)
