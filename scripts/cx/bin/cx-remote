@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Drive another machine's cx over SSH.
+#
+#   cx-remote <host> ls
+#   cx-remote <host> send win.1 "rebase onto main"
+#   cx-remote <host> peek win.1
+#
+# Everything after <host> is passed to cx on that machine verbatim, so every
+# subcommand and every subject pattern works exactly as it does locally.
+#
+# Why SSH rather than a message bus: the last hop into a Claude session is kitty
+# remote control over a unix socket, which is machine-local by construction. A bus
+# would still need something running on the target to perform that hop, so for a
+# handful of machines SSH is the same capability with nothing to deploy or keep
+# alive. A bus earns its place when panes must be discovered across hosts rather
+# than named, or when the target may be asleep when the message is sent.
+#
+# Requires on the target: cx (dev-env on PATH, or CX_REMOTE_PATH below) and a
+# running kitty with allow_remote_control. cx finds the kitty socket itself, so no
+# KITTY_LISTEN_ON needs setting on the far end.
+
+set -u
+
+if [ $# -lt 2 ]; then
+  cat >&2 <<'USAGE'
+usage: cx-remote <host> <cx-args...>
+       cx-remote mac ls
+       cx-remote mac send win.1 "message"
+       cx-remote mac peek win.1 20
+env:   CX_REMOTE_PATH  path to cx.py on the target
+       CX_REMOTE_PY    python on the target (default: /opt/homebrew/bin/python3)
+USAGE
+  exit 2
+fi
+
+host=$1
+shift
+
+remote_py=${CX_REMOTE_PY:-/opt/homebrew/bin/python3}
+remote_cx=${CX_REMOTE_PATH:-\$HOME/Documents/projects/dev-env/scripts/cx/bin/cx.py}
+
+# Each argument is quoted for the remote shell, so a message containing spaces,
+# quotes or a subject pattern arrives as one argument rather than being re-split
+# there — `cx-remote mac send 'win.*' "it's here"` has to survive two shells.
+quoted=""
+for a in "$@"; do
+  quoted="$quoted '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"
+done
+
+# -T: no pty wanted. cx never reads the terminal, and asking for one makes ssh
+# print "Pseudo-terminal will not be allocated" noise on hosts that refuse it.
+exec ssh -T "$host" "${remote_py} ${remote_cx}${quoted}"

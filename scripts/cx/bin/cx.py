@@ -106,6 +106,61 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 # grid, so `*` means the same thing at every position and `fin.*` cannot
 # accidentally match a differently-shaped name.
 
+def tmux_pane() -> str:
+    """This session's tmux pane id (%10), or "" when not under tmux.
+
+    Also the signal that any inherited kitty environment must be distrusted. tmux
+    hands the SERVER's environment to every session it later creates, so a claude
+    started under an aoe session carries whatever KITTY_WINDOW_ID the pane that
+    first started the tmux server had. Measured on this machine: three unrelated aoe
+    sessions all reported KITTY_WINDOW_ID=7 and a KITTY_LISTEN_ON pointing at a
+    kitty that had since exited. Registering on that would have given all three the
+    same window and aimed their messages at whatever pane is window 7 now.
+    """
+    return os.environ.get("TMUX_PANE", "") if os.environ.get("TMUX") else ""
+
+
+def kitty_window_id() -> int:
+    """The kitty window this session is in, or 0 if it is not in one of its own."""
+    if tmux_pane():
+        return 0  # inherited from the tmux server, not ours — see tmux_pane()
+    wid = os.environ.get("KITTY_WINDOW_ID", "")
+    return int(wid) if wid.isdigit() else 0
+
+
+def tmux_session_name() -> str:
+    """The tmux session this pane belongs to, e.g. aoe_PROE-6112-COPILOT-PL_5322ec11."""
+    pane = tmux_pane()
+    if not pane:
+        return ""
+    try:
+        out = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", "#{pane_id} #{session_name}"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == pane:
+            return parts[1].strip()
+    return ""
+
+
+def label_from_tmux(name: str) -> str:
+    """Turn an aoe tmux session name into a subject label.
+
+    aoe names its sessions aoe_<title-truncated>_<8 hex>, so both the prefix and the
+    id suffix are stripped: the title is the part a human recognises, and the id is
+    already carried by the session record.
+    """
+    if not name:
+        return ""
+    base = name[4:] if name.startswith("aoe_") else name
+    base = re.sub(r"_[0-9a-f]{8}$", "", base)
+    return token(base)
+
+
 def host_token() -> str:
     h = os.environ.get("CX_HOST") or ""
     if not h:
@@ -418,9 +473,48 @@ def kitty_bin() -> str:
     die("kitty not found on PATH")
 
 
+def kitty_socket() -> str:
+    """A `--to` target for kitty remote control, when the environment lacks one.
+
+    KITTY_LISTEN_ON is set for processes kitty started, so a pane's own commands
+    need nothing. An SSH session, a cron job or a launchd agent has no kitty
+    environment at all, and `kitty @` then falls back to the controlling terminal
+    and fails with "open /dev/tty: device not configured" — which reads like a
+    permissions problem rather than a missing address.
+
+    kitty.conf's `listen_on unix:/tmp/kitty` produces /tmp/kitty-<pid>, so the path
+    changes whenever kitty restarts and cannot simply be hardcoded on the far end.
+    Picking the newest live socket makes `ssh thatbox cx ls` work with no setup.
+    """
+    env = os.environ.get("KITTY_LISTEN_ON")
+    if env:
+        return env
+    import glob
+    import stat
+    socks = []
+    for pat in (os.environ.get("CX_KITTY_SOCKET_GLOB") or "/tmp/kitty-*",):
+        for p in glob.glob(pat):
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if stat.S_ISSOCK(st.st_mode):
+                socks.append((st.st_mtime, p))
+    if not socks:
+        return ""
+    return "unix:" + max(socks)[1]
+
+
 def kitty(*args: str, check: bool = True) -> str:
     """Run `kitty @ ...`. Returns stdout; raises SystemExit on failure."""
-    cmd = [kitty_bin(), "@", *args]
+    cmd = [kitty_bin(), "@"]
+    # Only when the environment did not already supply one: adding --to when
+    # KITTY_LISTEN_ON is set would override the pane's own socket for no reason.
+    if not os.environ.get("KITTY_LISTEN_ON"):
+        sock = kitty_socket()
+        if sock:
+            cmd += ["--to", sock]
+    cmd += [*args]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         if not check:
@@ -447,6 +541,37 @@ def pane_screen(win_id: int, extent: str = "screen") -> str:
 
 def window_exists(win_id: int) -> bool:
     return bool(kitty("ls", "--match", f"id:{win_id}", check=False).strip())
+
+
+def tmux_paste_and_submit(pane: str, text: str) -> bool:
+    """The tmux equivalent of _paste_and_submit, for aoe-hosted sessions.
+
+    kitty remote control cannot reach these: the claude process is a child of the
+    tmux server, not of any kitty window. tmux's own send-keys is the same
+    capability against the same pty.
+
+    -l sends the text literally, so a message containing what tmux would otherwise
+    read as a key name ("Enter", "C-c") arrives as text. Enter goes as a separate
+    call for the same reason it does under kitty: it is a key, not literal text.
+    """
+    try:
+        for args in (["send-keys", "-t", pane, "-l", text],
+                     ["send-keys", "-t", pane, "Enter"]):
+            r = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def tmux_pane_alive(pane: str) -> bool:
+    try:
+        out = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id}"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return pane in {ln.strip() for ln in out.splitlines()}
 
 
 def _paste_and_submit(win_id: int, text: str) -> None:
@@ -508,6 +633,26 @@ def deliver(dst: dict, text: str, msg: str, sid: str, who: str) -> str:
     text is then cleared (ctrl-U) and the message is queued for the Stop hook, which
     is a real channel into the session rather than keystrokes aimed at a TUI.
     """
+    # An aoe/tmux session has no kitty window, but it does have a pty tmux can
+    # write to. Without this it could only ever be queued, so a message to an idle
+    # one would wait for a Stop that never comes (nothing wakes an idle session but
+    # input). The stranded-text check does not apply: tmux send-keys is one call
+    # against the pty, not a paste that a redraw can interleave with.
+    pane = dst.get("tmux_pane") or ""
+    if pane:
+        if not tmux_pane_alive(pane):
+            if sid:
+                enqueue(sid, who, msg)
+                return "queued"
+            die(f"tmux pane {pane} is gone — message lost")
+        with file_lock(f"send-tmux-{re.sub(r'[^A-Za-z0-9]', '', pane)}", timeout=5.0):
+            if not tmux_paste_and_submit(pane, text):
+                if sid:
+                    enqueue(sid, who, msg)
+                    return "queued"
+                die(f"tmux send-keys to {pane} failed")
+        return "typed"
+
     if not dst["win"]:
         enqueue(sid, who, msg)
         return "queued"
@@ -638,8 +783,22 @@ def drain_inbox(session_id: str) -> list[dict]:
 # registry
 # --------------------------------------------------------------------------
 
-def registry() -> dict[int, dict]:
-    out: dict[int, dict] = {}
+def record_key(rec: dict) -> str:
+    """The registry key for a session record.
+
+    A kitty pane is keyed by its window id; a tmux-hosted session (aoe) has no
+    window of its own and is keyed by its tmux pane id instead. Keys are strings so
+    the two can share one namespace — "174" and "t%10" — rather than needing a
+    second registry with its own lifecycle.
+    """
+    pane = rec.get("tmux_pane") or ""
+    if pane:
+        return "t" + pane
+    return str(rec.get("kitty_window_id") or 0)
+
+
+def registry() -> dict[str, dict]:
+    out: dict[str, dict] = {}
     if not os.path.isdir(PANES_DIR):
         return out
     for fn in os.listdir(PANES_DIR):
@@ -648,10 +807,21 @@ def registry() -> dict[int, dict]:
         try:
             with open(os.path.join(PANES_DIR, fn)) as fh:
                 rec = json.load(fh)
-            out[int(rec["kitty_window_id"])] = rec
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError):
             continue
+        key = record_key(rec)
+        if key != "0":
+            out[key] = rec
     return out
+
+
+def registry_by_win() -> dict[int, dict]:
+    """Only the records that have a real kitty window, keyed by it."""
+    return {
+        int(r["kitty_window_id"]): r
+        for r in registry().values()
+        if r.get("kitty_window_id")
+    }
 
 
 _STATUS_CACHE: dict | None = None
@@ -888,16 +1058,21 @@ class file_lock:
 
 def write_record(rec: dict) -> None:
     os.makedirs(PANES_DIR, exist_ok=True)
-    path = os.path.join(PANES_DIR, f"{rec['kitty_window_id']}.json")
+    # Filename mirrors record_key, so a tmux session and a pane cannot collide on
+    # disk the way they would if both used kitty_window_id (which is 0 for tmux).
+    safe = re.sub(r"[^A-Za-z0-9_%-]+", "-", record_key(rec))
+    path = os.path.join(PANES_DIR, f"{safe}.json")
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as fh:
         json.dump(rec, fh, indent=1)
     os.replace(tmp, path)  # atomic: concurrent sessions never see a half file
 
 
-def drop_record(win_id: int) -> None:
+def drop_record(key) -> None:
+    """Remove a registry record by its record_key (a window id or "t<pane>")."""
+    safe = re.sub(r"[^A-Za-z0-9_%-]+", "-", str(key))
     try:
-        os.remove(os.path.join(PANES_DIR, f"{win_id}.json"))
+        os.remove(os.path.join(PANES_DIR, f"{safe}.json"))
     except OSError:
         pass
 
@@ -954,6 +1129,11 @@ def is_claude_pane(win: dict) -> bool:
 
 def roster(claude_only: bool = True) -> list[dict]:
     reg = registry()
+    reg_by_win = {int(r["kitty_window_id"]): r for r in reg.values()
+                  if r.get("kitty_window_id")}
+    # Registered sessions that have no kitty window of their own — tmux-hosted, i.e.
+    # aoe. They are added after the pane walk, since kitty cannot see them.
+    reg_detached = [r for r in reg.values() if not r.get("kitty_window_id")]
     st_by_win = status_by_win()
     rows: list[dict] = []
     seen_sessions: set[str] = set()
@@ -962,7 +1142,7 @@ def roster(claude_only: bool = True) -> list[dict]:
         for tab in os_win["tabs"]:
             for win in tab["windows"]:
                 wid = win["id"]
-                rec = reg.get(wid)
+                rec = reg_by_win.get(wid)
                 st = st_by_win.get(wid)
                 pid = claude_pid_in_pane(win)
                 # A state record is third proof that this pane holds an agent, and
@@ -998,6 +1178,24 @@ def roster(claude_only: bool = True) -> list[dict]:
     # Sessions with a live record but no pane of their own: running under tmux, or
     # on another host once records are shared. Addressable for status even though
     # `cx send` cannot type into them.
+    # tmux-hosted sessions first: they carry a subject from their own registration,
+    # which a state record alone would not give them.
+    for r in reg_detached:
+        sid = r.get("session_id") or ""
+        if sid and sid in seen_sessions:
+            continue
+        if sid:
+            seen_sessions.add(sid)
+        st = status_records().get(sid) or {}
+        rows.append({
+            "win": 0, "pid": None, "tab": None, "tab_title": "", "os_win": None,
+            "title": "", "cwd": r.get("cwd") or st.get("cwd") or "",
+            "name": r.get("name") or "", "slot": r.get("slot"),
+            "session_id": sid, "subject": r.get("subject") or "",
+            "registered": True, "self": False, "detached": True,
+            "tmux_pane": r.get("tmux_pane") or "",
+        })
+
     now = time.time()
     for sid, st in status_records().items():
         if sid in seen_sessions or st.get("state") == "ended":
@@ -1272,7 +1470,7 @@ def cmd_ls(argv: list[str]) -> int:
         if r.get("detached"):
             name += "@"
         win = str(r["win"]) if r["win"] else "-"
-        started = (registry().get(r["win"], {}) or {}).get("started") or 0
+        started = (registry_by_win().get(r["win"], {}) or {}).get("started") or 0
         age = human_age(time.time() - started) if started else "-"
         print(
             f"{mark:2}{r['slot']:>4}  {trunc(name, 22):<22} {win:>4} {st:<8} {age:>4} "
@@ -1303,7 +1501,7 @@ def deliver_to(dst: dict, msg: str, who: str, force_queue: bool = False,
     # goes through deliver(), which re-checks busy-ness INSIDE the pane's send lock —
     # the check cannot be made out here, because concurrent senders would all read
     # "idle" before any of them writes.
-    if sid and (force_queue or not dst["win"]):
+    if sid and (force_queue or (not dst["win"] and not dst.get("tmux_pane"))):
         enqueue(sid, who, msg)
         pending = len(os.listdir(inbox_path(sid)))
         why = "queued" if force_queue else "no pane"
@@ -1311,7 +1509,8 @@ def deliver_to(dst: dict, msg: str, who: str, force_queue: bool = False,
               f"({pending} pending)")
         return 0
 
-    require_pane(dst)
+    if not dst.get("tmux_pane"):
+        require_pane(dst)
     if deliver(dst, text, msg, sid, who) == "queued":
         pending = len(os.listdir(inbox_path(sid))) if sid else 0
         print(f"cx: {label} was busy — queued, delivered on its next Stop "
@@ -1774,13 +1973,14 @@ def cmd_name(argv: list[str]) -> int:
     subject = subject_of(label, int(idx))
 
     reg = registry()
-    rec = reg.get(dst["win"]) or {
+    rec = registry_by_win().get(dst["win"]) or {
         "kitty_window_id": dst["win"],
         "session_id": dst.get("session_id", ""),
         "cwd": dst["cwd"],
         "started": int(time.time()),
     }
-    taken = {r.get("subject") for w, r in reg.items() if w != dst["win"]}
+    taken = {r.get("subject") for r in reg.values()
+             if r.get("kitty_window_id") != dst["win"]}
     if subject in taken:
         die(f"'{short_subject(subject)}' is already used by another pane")
     rec["subject"] = subject
@@ -1892,20 +2092,25 @@ def cmd_register(argv: list[str]) -> int:
         payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     except (ValueError, OSError):
         payload = {}
-    wid = os.environ.get("KITTY_WINDOW_ID")
-    if not (wid and wid.isdigit()):
-        return 0  # not in kitty; nothing to register against
-    wid_i = int(wid)
+    # A session registers if it has a place cx can name: a kitty window of its own,
+    # or a tmux pane (an aoe session). kitty_window_id() returns 0 under tmux on
+    # purpose — the inherited value belongs to whichever pane started the tmux
+    # server, not to this session.
+    wid_i = kitty_window_id()
+    pane = tmux_pane()
+    if not wid_i and not pane:
+        return 0  # neither a kitty pane nor a tmux one; nothing to register against
     # Everything from here to write_record is a read-modify-write over the shared
     # registry, so it is done under the lock: concurrent grid registrations
     # otherwise read one snapshot and pick the same slot and index.
     with file_lock("register"):
-        return _register_locked(wid_i, payload)
+        return _register_locked(wid_i, payload, pane)
 
 
-def _register_locked(wid_i: int, payload: dict) -> int:
+def _register_locked(wid_i: int, payload: dict, pane: str = "") -> int:
     reg = registry()
-    rec = reg.get(wid_i, {})
+    key = "t" + pane if pane else str(wid_i)
+    rec = reg.get(key, {})
     cwd = payload.get("cwd") or os.getcwd()
     slot = rec.get("slot")
     if slot is None:
@@ -1929,7 +2134,11 @@ def _register_locked(wid_i: int, payload: dict) -> int:
         # cwd's basename. The index distinguishes panes within that label —
         # CX_INDEX when the launcher numbered them, otherwise the lowest free
         # index for this label so a lone pane still gets a well-formed subject.
+        # An aoe session is named by its tmux session, which carries the title the
+        # operator chose (aoe_PROE-6112-COPILOT-PL_5322ec11 -> proe-6112-copilot-pl).
+        # That beats the cwd, which for aoe worktrees is a path nobody recognises.
         label = token(os.environ.get("CX_NAME", "").strip()
+                      or (label_from_tmux(tmux_session_name()) if pane else "")
                       or os.path.basename(cwd.rstrip("/")) or "session")[:40]
         taken = {
             r.get("subject") for w, r in reg.items() if w != wid_i and r.get("subject")
@@ -1991,6 +2200,7 @@ def _register_locked(wid_i: int, payload: dict) -> int:
     write_record(
         {
             "kitty_window_id": wid_i,
+            "tmux_pane": pane,
             "slot": slot,
             "name": name,
             "subject": subject,
@@ -2011,9 +2221,13 @@ def cmd_unregister(argv: list[str]) -> int:
     it happens once per session rather than once per tool call, and nothing is
     waiting on the result. Never allowed to fail the hook.
     """
-    wid = os.environ.get("KITTY_WINDOW_ID")
-    if wid and wid.isdigit():
-        drop_record(int(wid))
+    pane = tmux_pane()
+    if pane:
+        drop_record("t" + pane)
+    else:
+        wid = kitty_window_id()
+        if wid:
+            drop_record(str(wid))
     try:
         _STATUS_CACHE_RESET()
         cmd_gc(["--quiet"])
@@ -2099,10 +2313,26 @@ def cmd_gc(argv: list[str]) -> int:
     live_wins = {r["win"] for r in rows}
     live_sids = {r["session_id"] for r in rows if r.get("session_id")}
 
-    dropped_panes = [w for w in registry() if w not in live_wins]
+    live_panes = set()
+    try:
+        out = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id}"],
+                             capture_output=True, text=True, timeout=5).stdout
+        live_panes = {ln.strip() for ln in out.splitlines() if ln.strip()}
+    except (OSError, subprocess.SubprocessError):
+        # tmux absent or not running: treat every tmux record as live rather than
+        # collecting sessions that may simply be unreachable from here.
+        live_panes = None
+
+    dropped_panes = []
+    for key, rec in registry().items():
+        if key.startswith("t"):
+            if live_panes is not None and rec.get("tmux_pane") not in live_panes:
+                dropped_panes.append(key)
+        elif int(rec.get("kitty_window_id") or 0) not in live_wins:
+            dropped_panes.append(key)
     if not dry:
-        for w in dropped_panes:
-            drop_record(w)
+        for key in dropped_panes:
+            drop_record(key)
 
     dropped_state = []
     for sid, rec in status_records().items():
