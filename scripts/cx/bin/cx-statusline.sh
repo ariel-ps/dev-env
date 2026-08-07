@@ -34,17 +34,23 @@ field() {
 model="$(field display_name)"
 cwd="$(field current_dir)"
 
+# The registry is read FIRST, and the order matters: its `name` is the pane's
+# current subject and is what `cx name` rewrites, whereas CX_NAME is fixed at launch
+# and cannot be changed in a running process. Reading the environment first would
+# pin the badge to the launch-time name for the life of the session, so a renamed
+# pane would answer to one name and display another.
+#
+# sed rather than invoking cx.py: a statusline runs on every redraw, so a Python
+# start-up per frame is too expensive to justify.
 name=""
-[ -n "${CX_NAME:-}" ] && name="${CX_NAME}.${CX_INDEX:-1}"
-
-# Fall back to whatever this pane called itself when it registered — its `name`
-# field is already the host-less subject. Grepping the record beats invoking cx.py:
-# a statusline runs on every redraw, so a Python start-up per frame is too
-# expensive to justify.
-if [ -z "$name" ] && [ -n "${KITTY_WINDOW_ID:-}" ]; then
+if [ -n "${KITTY_WINDOW_ID:-}" ]; then
   rec="${CX_STATE_DIR:-$HOME/.claude/cx}/panes/${KITTY_WINDOW_ID}.json"
   [ -r "$rec" ] && name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$rec" | head -1)"
 fi
+
+# Only until SessionStart registers the pane: CX_NAME alone is the LABEL, shared by
+# every pane of a grid, so it must never be used without its index.
+[ -z "$name" ] && [ -n "${CX_NAME:-}" ] && name="${CX_NAME}.${CX_INDEX:-1}"
 
 [ -z "$name" ] && name="${cwd##*/}"
 [ -z "$name" ] && name="claude"

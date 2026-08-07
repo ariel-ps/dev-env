@@ -107,17 +107,32 @@ case "$AGENT" in
   *) WHO="$AGENT" ;;
 esac
 
-# Show the pane's cx subject when a launcher gave it one, so the tab bar and
-# `cx ls` name the pane identically — otherwise a grid pane is "fin.2" to cx and
-# "2 C ariel.zilbershteyin" in the tab bar, two names for one pane. The host token
-# is omitted here: every pane in this tab bar is on this host, so it would be the
-# same noise on every title.
+# Show the pane's cx subject, so the tab bar and `cx ls` name the pane identically
+# — otherwise a grid pane is "fin.2" to cx and "2 C ariel.zilbershteyin" in the tab
+# bar, two names for one pane. The host token is omitted: every pane in this tab bar
+# is on this host, so it would be the same noise on every title.
 #
-# CX_INDEX is normally set alongside CX_NAME by the launcher. Falling back to
-# KITTY_AGENT_TITLE_PREFIX and then 1 keeps the title well-formed for a pane that
-# was given a label but no index.
-if [ -n "${CX_NAME:-}" ]; then
-  LABEL="$WHO ${CX_NAME}.${CX_INDEX:-${KITTY_AGENT_TITLE_PREFIX:-1}}"
+# The REGISTRY is read before the environment, and that order is the point. CX_NAME
+# is fixed at launch and cannot be rewritten in a running process, so a title taken
+# from it can never follow a `cx name` rename — the pane would answer to its new
+# subject while the tab bar kept the old one indefinitely. The registry is what
+# rename updates, so reading it makes the title track.
+#
+# sed rather than jq: this runs on every PreToolUse, and the file is one small
+# object. CX_NAME/CX_INDEX remain the fallback for the window between a pane
+# launching and its SessionStart hook registering it.
+SUBJECT=""
+if [ -n "${KITTY_WINDOW_ID:-}" ]; then
+  CX_REC="${CX_STATE_DIR:-$HOME/.claude/cx}/panes/${KITTY_WINDOW_ID}.json"
+  [ -r "$CX_REC" ] &&
+    SUBJECT=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CX_REC" | head -1)
+fi
+if [ -z "$SUBJECT" ] && [ -n "${CX_NAME:-}" ]; then
+  SUBJECT="${CX_NAME}.${CX_INDEX:-${KITTY_AGENT_TITLE_PREFIX:-1}}"
+fi
+
+if [ -n "$SUBJECT" ]; then
+  LABEL="$WHO $SUBJECT"
 else
   LABEL="$WHO $REPO"
   [ -n "${KITTY_AGENT_TITLE_PREFIX:-}" ] && LABEL="${KITTY_AGENT_TITLE_PREFIX} $LABEL"

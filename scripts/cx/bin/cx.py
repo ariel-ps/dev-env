@@ -1753,15 +1753,14 @@ def cmd_name(argv: list[str]) -> int:
     rec["name"] = short_subject(subject)
     rec.setdefault("slot", dst["slot"])
     write_record(rec)
-    # Deliberately not touching the kitty window title: kitty-agent-title owns it
-    # and re-renders it on every hook event, so anything written here would be
-    # overwritten within seconds. It reads CX_NAME from the pane's environment,
-    # which cannot be changed after launch — so the title keeps the launch-time
-    # subject until the session restarts. Said plainly rather than left surprising.
+    # The title is not written here on purpose: kitty-agent-title owns it and
+    # re-renders on every hook event, so anything set here would be overwritten
+    # within seconds. It reads this registry record rather than the environment, so
+    # it picks the new name up by itself — on the pane's next lifecycle event, which
+    # for a session sitting at a prompt means its next turn.
     print(f"cx: win {dst['win']} is now '{short_subject(subject)}'"
           + (f" (was '{short_subject(old)}')" if old else "")
-          + "\ncx: the kitty tab title still shows the launch-time name — it comes "
-            "from the pane's environment, which cannot be rewritten after launch.")
+          + "\ncx: the tab title and statusline follow on this pane's next hook event.")
     return 0
 
 
