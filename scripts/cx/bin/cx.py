@@ -193,7 +193,7 @@ POLICIES = ("down-siblings", "down-replies", "down", "open")
 #
 # So an immediate reciprocation is refused as well: if A messaged B recently, B may
 # not message A back within this window unless A has an unanswered request open to
-# B (i.e. A asked for a reply), or --force is given. Tight ping-pong becomes
+# B (i.e. A asked for a reply). Tight ping-pong becomes
 # impossible while request/reply and ordinary one-way traffic still work.
 RECIPROCAL_WINDOW = 90
 SENT_DIR = os.path.join(STATE_DIR, "sent")
@@ -376,7 +376,7 @@ def hierarchy_check(sender: str, target: str, replying: bool = False) -> tuple[b
                 f"'{'.'.join(t)}' messaged this session {int(age)}s ago and has no open "
                 f"request — refusing to send straight back, which is how two siblings "
                 f"start a loop. Wait {int(RECIPROCAL_WINDOW - age)}s, use `cx ask` if you "
-                f"need an answer, or --force"
+                f"need an answer"
             )
         return True, "sibling"
     if pol == "down-replies" and replying and s[: len(t)] == t:
@@ -462,6 +462,15 @@ def _paste_and_submit(win_id: int, text: str) -> None:
     kitty("send-text", "--match", f"id:{win_id}", "--", "\\r", check=False)
 
 
+def input_line_text(win_id: int) -> str:
+    """Whatever is currently typed on the pane's live prompt line."""
+    for line in reversed(pane_screen(win_id).splitlines()):
+        s = line.strip()
+        if s.startswith("❯"):
+            return s.lstrip("❯").strip()
+    return ""
+
+
 def input_line_holds(win_id: int, needle: str) -> bool:
     """Is `needle` sitting on the pane's LIVE prompt line, i.e. pasted but not sent?
 
@@ -508,6 +517,14 @@ def deliver(dst: dict, text: str, msg: str, sid: str, who: str) -> str:
     needle = " ".join(msg.split())[:24]
 
     with file_lock(f"send-{dst['win']}", timeout=5.0):
+        # Pasting appends to whatever is already on the prompt line. A pane holding
+        # a half-typed line turned "cx/a: hello" into "leecx/a: hello" — the message
+        # corrupted and the draft submitted with it. Clearing first would destroy
+        # someone's half-written prompt instead, so a busy input line means queue.
+        pending_text = input_line_text(dst["win"])
+        if pending_text and sid:
+            enqueue(sid, who, msg)
+            return "queued"
         _paste_and_submit(dst["win"], text)
         stranded = needle and input_line_holds(dst["win"], needle)
         if stranded:
@@ -1234,7 +1251,43 @@ def cmd_ls(argv: list[str]) -> int:
     return 0
 
 
-def guard_send(rows: list[dict], dst: dict, label: str, force: bool) -> None:
+def deliver_to(dst: dict, msg: str, who: str, force_queue: bool = False,
+               label: str = "") -> int:
+    """Put one message in front of one pane, and say how it got there.
+
+    Shared by the single-target and pattern paths so that neither can drift from
+    the other — `cx ask` having kept its own copy of delivery is exactly how it
+    ended up exempt from every guard.
+
+    Assumes the caller has already run guard_send for this target.
+    """
+    sid = dst.get("session_id") or ""
+    label = label or f"slot {dst['slot']} ({dst['name'] or dst['title'] or '?'})"
+    text = f"cx/{who}: {msg}"
+
+    # An explicit --queue, or no pane to type into, is decided here. Everything else
+    # goes through deliver(), which re-checks busy-ness INSIDE the pane's send lock —
+    # the check cannot be made out here, because concurrent senders would all read
+    # "idle" before any of them writes.
+    if sid and (force_queue or not dst["win"]):
+        enqueue(sid, who, msg)
+        pending = len(os.listdir(inbox_path(sid)))
+        why = "queued" if force_queue else "no pane"
+        print(f"cx: {label} {why} — queued, delivered on its next Stop "
+              f"({pending} pending)")
+        return 0
+
+    require_pane(dst)
+    if deliver(dst, text, msg, sid, who) == "queued":
+        pending = len(os.listdir(inbox_path(sid))) if sid else 0
+        print(f"cx: {label} was busy — queued, delivered on its next Stop "
+              f"({pending} pending)")
+    else:
+        print(f"cx: typed into {label}, win {dst['win']}")
+    return 0
+
+
+def guard_send(rows: list[dict], dst: dict, label: str) -> None:
     """Every check that must pass before one session may message another.
 
     Factored out because `cx ask` had its own delivery path and so was subject to
@@ -1243,10 +1296,13 @@ def guard_send(rows: list[dict], dst: dict, label: str, force: bool) -> None:
     for anyone who reached for ask. Any future path that delivers to a pane belongs
     here too.
 
+    There is deliberately no per-call override. A flag any sender can append makes
+    every check advisory — an agent that hits a refusal simply retries with it, which
+    is exactly the runaway this exists to stop. Widening what is permitted is
+    `cx policy`: explicit, global, and visible in `cx policy` output afterwards.
+
     Dies on refusal; returns None when the send may proceed.
     """
-    if force:
-        return
     me_row = self_row(rows) or {}
     me_subj = me_row.get("subject") or ""
     dst_subj = dst.get("subject") or ""
@@ -1256,20 +1312,20 @@ def guard_send(rows: list[dict], dst: dict, label: str, force: bool) -> None:
     )
     if not ok:
         die(f"refusing to send to {label}: {why}. "
-            f"Use --force to override, or set CX_POLICY (see `cx policy`).")
+            f"Widen this with `cx policy <name>` if it is deliberate.")
 
     me_id, dst_id = chain_id(me_row), chain_id(dst)
     chain = read_cause(me_row.get("session_id") or "") + ([me_id] if me_id else [])
     ok, why = chain_check(chain, dst_id)
     if not ok:
-        die(f"refusing to send to {label}: {why}. Use --force to override.")
+        die(f"refusing to send to {label}: {why}.")
 
     who = self_label(rows)
     ok, n = rate_check(who)
     if not ok:
         die(f"{who} has sent {n} messages in the last {SEND_WINDOW // 60} minutes — "
             f"refusing, in case two sessions are replying to each other in a loop. "
-            f"Use --force if this is deliberate.")
+            f"Wait for the window to pass.")
 
     record_send(me_subj, dst_subj)
     write_cause(dst.get("session_id") or "", chain)
@@ -1284,10 +1340,9 @@ def cmd_send(argv: list[str]) -> int:
     Stop hook (`cx drain`) feeds it in as a real turn the moment it finishes.
     """
     force_queue = "--queue" in argv
-    force = "--force" in argv
-    argv = [a for a in argv if a not in ("--queue", "--force")]
+    argv = [a for a in argv if a != "--queue"]
     if len(argv) < 2:
-        die("usage: cx send <slot|name> <message...> [--queue] [--force]")
+        die("usage: cx send <slot|name> <message...> [--queue]")
     target, msg = argv[0], " ".join(argv[1:])
     rows = roster()
 
@@ -1302,51 +1357,51 @@ def cmd_send(argv: list[str]) -> int:
             die(f"'{target}' matched only this pane — nothing to send to")
         # A pattern is a broad address, so targets the policy forbids are skipped
         # with a count rather than failing the whole fan-out.
-        if not force:
-            me_subj = (me_row or {}).get("subject") or ""
-            allowed, blocked = [], []
-            for r in hits:
-                ok, why = hierarchy_check(me_subj, r.get("subject") or "")
-                (allowed if ok else blocked).append((r, why))
-            if blocked:
-                print(f"cx: policy '{policy()}' skipped {len(blocked)} target(s): "
-                      + ", ".join(short_subject(r.get('subject') or '') for r, _ in blocked),
-                      file=sys.stderr)
-            if not allowed:
-                die(f"policy '{policy()}' forbids every target matching '{target}' "
-                    f"({blocked[0][1]})")
-            my_sid = (me_row or {}).get("session_id") or ""
-            me_id = chain_id(me_row or {})
-            chain = read_cause(my_sid) + ([me_id] if me_id else [])
-            kept = []
-            for r, _ in allowed:
-                cok, cwhy = chain_check(chain, chain_id(r))
-                if not cok:
-                    print(f"cx: skipped {short_subject(r.get('subject') or '')}: {cwhy}",
-                          file=sys.stderr)
-                    continue
-                record_send(me_subj, r.get("subject") or "")
-                write_cause(r.get("session_id") or "", chain)
-                kept.append(r)
-            if not kept:
-                die(f"every target matching '{target}' would close a message loop")
-            hits = kept
-        # One rate check for the whole fan-out, then --force on each leg. Counting
-        # each leg separately would spend a 9-pane grid's worth of allowance on a
-        # single `cx send 'grid.*'`, so two of them would trip the runaway guard.
-        who_me = self_label(rows)
-        if not force:
-            ok, n = rate_check(who_me)
-            if not ok:
-                die(f"{who_me} has sent {n} messages in the last {SEND_WINDOW // 60} "
-                    f"minutes — refusing, in case two sessions are replying to each "
-                    f"other in a loop. Use --force if this is deliberate.")
-        rc = 0
+        me_subj = (me_row or {}).get("subject") or ""
+        allowed, blocked = [], []
         for r in hits:
-            subj = short_subject(r.get("subject") or "") or r["name"]
-            rc |= cmd_send([subj, msg, "--force"] + (["--queue"] if force_queue else []))
+            ok, why = hierarchy_check(me_subj, r.get("subject") or "")
+            (allowed if ok else blocked).append((r, why))
+        if blocked:
+            print(f"cx: policy '{policy()}' skipped {len(blocked)} target(s): "
+                  + ", ".join(short_subject(r.get('subject') or '') for r, _ in blocked),
+                  file=sys.stderr)
+        if not allowed:
+            die(f"policy '{policy()}' forbids every target matching '{target}' "
+                f"({blocked[0][1]})")
+        my_sid = (me_row or {}).get("session_id") or ""
+        me_id = chain_id(me_row or {})
+        chain = read_cause(my_sid) + ([me_id] if me_id else [])
+        kept = []
+        for r, _ in allowed:
+            cok, cwhy = chain_check(chain, chain_id(r))
+            if not cok:
+                print(f"cx: skipped {short_subject(r.get('subject') or '')}: {cwhy}",
+                      file=sys.stderr)
+                continue
+            record_send(me_subj, r.get("subject") or "")
+            write_cause(r.get("session_id") or "", chain)
+            kept.append(r)
+        if not kept:
+            die(f"every target matching '{target}' would close a message loop")
+        hits = kept
+        # One rate check for the whole fan-out. Counting each leg separately would
+        # spend a 9-pane grid's worth of allowance on a single `cx send 'grid.*'`,
+        # so two of them would trip the runaway guard.
+        who_me = self_label(rows)
+        ok, n = rate_check(who_me)
+        if not ok:
+            die(f"{who_me} has sent {n} messages in the last {SEND_WINDOW // 60} "
+                f"minutes — refusing, in case two sessions are replying to each "
+                f"other in a loop. Wait for the window to pass.")
+        # Delivery goes straight to the helper rather than back through cmd_send.
+        # Recursing would re-run the guards per leg, and the only way to suppress
+        # that was a bypass token on the argv — which is exactly the per-call
+        # override that was just removed for being trivially reusable by a sender.
+        for r in hits:
+            deliver_to(r, msg, who_me, force_queue)
         print(f"cx: sent to {len(hits)} pane(s) matching '{target}'")
-        return rc
+        return 0
 
     dst = resolve(target, rows)
     me = self_row(rows)
@@ -1365,29 +1420,9 @@ def cmd_send(argv: list[str]) -> int:
     if state == "ended":
         die(f"{label} has ended — nothing there to receive the message")
 
-    guard_send(rows, dst, label, force)
+    guard_send(rows, dst, label)
 
-    # An explicit --queue, or no pane to type into, is decided here. Everything
-    # else goes through deliver(), which re-checks busy-ness INSIDE the pane's send
-    # lock — the check cannot be made out here, because concurrent senders would
-    # all read "idle" before any of them writes.
-    if sid and (force_queue or not dst["win"]):
-        enqueue(sid, who, msg)
-        pending = len(os.listdir(inbox_path(sid)))
-        why = "queued" if force_queue else "no pane"
-        print(f"cx: {label} {why} — queued, delivered on its next Stop "
-              f"({pending} pending)")
-        return 0
-
-    require_pane(dst)
-    how = deliver(dst, text, msg, sid, who)
-    if how == "queued":
-        pending = len(os.listdir(inbox_path(sid))) if sid else 0
-        print(f"cx: {label} was busy — queued, delivered on its next Stop "
-              f"({pending} pending)")
-    else:
-        print(f"cx: typed into {label}, win {dst['win']}")
-    return 0
+    return deliver_to(dst, msg, who, force_queue, label=label)
 
 
 def cmd_drain(argv: list[str]) -> int:
@@ -1477,10 +1512,10 @@ def cmd_ask(argv: list[str]) -> int:
             die("--timeout wants seconds, e.g. --timeout 120")
         del argv[i : i + 2]
     if len(argv) < 2:
-        die('usage: cx ask <slot|name> "<question>" [--timeout SECS] [--force]')
+        die('usage: cx ask <slot|name> "<question>" [--timeout SECS]')
 
     target = argv[0]
-    question = " ".join(a for a in argv[1:] if a != "--force")
+    question = " ".join(argv[1:])
     rows = roster()
     dst = require_pane(resolve(target, rows))
     me = self_row(rows)
@@ -1489,8 +1524,7 @@ def cmd_ask(argv: list[str]) -> int:
 
     # Same gauntlet as cx send. Without this, ask was a way around the policy and
     # the loop guards entirely.
-    force = "--force" in argv
-    guard_send(rows, dst, f"slot {dst['slot']} ({dst['name'] or dst['title']})", force)
+    guard_send(rows, dst, f"slot {dst['slot']} ({dst['name'] or dst['title']})")
 
     os.makedirs(MAIL_DIR, exist_ok=True)
     req_id = f"{int(time.time())}-{os.getpid()}"
@@ -1793,7 +1827,7 @@ def cmd_policy(argv: list[str]) -> int:
     print("  down           strictly down. Acyclic, but `cx ask` cannot answer.")
     print("  open           no restriction.")
     print("\n  set with: cx policy <name>   (or CX_POLICY=<name> for one session)")
-    print("  --force on a send overrides whatever is active.")
+    print("  There is no per-call override: widening is a policy change, not a flag.")
     print("\n  A pane with no subject is outside the tree and always reachable in both")
     print("  directions, so an agent can report to you and you can drive your grid.")
     print("  Give that pane a subject (cx name) to bring it under the rules.")
@@ -1967,7 +2001,7 @@ KEEP_QUEUED = 7 * 24 * 3600
 # rather than tracking chain depth through the messages. Depth would need the model
 # to propagate a hop count it has no reason to preserve; a rate limit needs no
 # cooperation and bounds the loop whatever shape it takes. The cost is that a
-# legitimately chatty orchestrator hits it too — hence --force to override, and a
+# legitimately chatty orchestrator hits it too, hence a
 # window sized well above conversational use.
 MAX_SENDS_PER_WINDOW = 20
 SEND_WINDOW = 300
@@ -2097,7 +2131,7 @@ def cmd_help(argv: list[str]) -> int:
         "  ls [pattern] [--all] [-q]  roster + live status (pattern: e.g. 'build.*')\n"
         "  send <who> <msg...>       deliver a message: typed in if the target is at a\n"
         "                            prompt, queued for its next Stop if it is busy\n"
-        "                            [--queue: always queue] [--force: ignore rate cap]\n"
+        "                            [--queue: always queue]\n"
         "  ask <who> <q> [--timeout S]  ask and block for the answer (default 300s)\n"
         "  answer <req-id> <text>    answer a request you were asked (receiver side)\n"
         "  answers <req-id>          print an answer that arrived after a timeout\n"
