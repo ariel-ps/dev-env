@@ -124,6 +124,24 @@ esac
 SUBJECT=""
 if [ -n "${KITTY_WINDOW_ID:-}" ]; then
   CX_REC="${CX_STATE_DIR:-$HOME/.claude/cx}/panes/${KITTY_WINDOW_ID}.json"
+
+  # At SessionStart the record may not exist yet: Claude Code runs an event's hooks
+  # in PARALLEL, so `cx register` and this hook start together and ordering them in
+  # settings.json changes nothing (tried; it did not). Without a wait the first
+  # title falls back to the repo name, and every pane of a grid shows the same
+  # string until something else makes a hook fire — two panes both reading "C tmp"
+  # is exactly the ambiguity the subject exists to remove.
+  #
+  # Bounded to ~1s and only on SessionStart, which happens once per session. Every
+  # other event is on the hot path and reads whatever is already there.
+  if [ ! -r "$CX_REC" ] && [ "$EVENT" = "SessionStart" ]; then
+    n=0
+    while [ ! -r "$CX_REC" ] && [ "$n" -lt 20 ]; do
+      sleep 0.05
+      n=$((n + 1))
+    done
+  fi
+
   [ -r "$CX_REC" ] &&
     SUBJECT=$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CX_REC" | head -1)
 fi
