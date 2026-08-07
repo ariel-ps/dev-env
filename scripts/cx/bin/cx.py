@@ -220,6 +220,80 @@ def window_exists(win_id: int) -> bool:
     return bool(kitty("ls", "--match", f"id:{win_id}", check=False).strip())
 
 
+def _paste_and_submit(win_id: int, text: str) -> None:
+    """The two raw writes. Callers must already hold the pane's send lock."""
+    subprocess.run(
+        [kitty_bin(), "@", "send-text", "--match", f"id:{win_id}",
+         "--bracketed-paste", "auto", "--stdin"],
+        input=text, text=True, capture_output=True,
+    )
+    # Enter goes as its own write. The paste above is a single unit to the TUI, so
+    # no sleep is needed between them — the guessed delay this replaces was only
+    # ever compensating for keystroke-by-keystroke delivery.
+    kitty("send-text", "--match", f"id:{win_id}", "--", "\\r", check=False)
+
+
+def input_line_holds(win_id: int, needle: str) -> bool:
+    """Is `needle` sitting on the pane's LIVE prompt line, i.e. pasted but not sent?
+
+    Claude Code's prompt renders as "❯ <text>", and a prompt that was submitted
+    stays on screen looking exactly the same. Only the bottom-most one is the live
+    input line, so only that one may be tested: scanning every "❯" line finds the
+    echo of a message that DID submit and reports it as stranded, which delivered it
+    twice — once typed, once from the queue.
+    """
+    for line in reversed(pane_screen(win_id).splitlines()):
+        s = line.strip()
+        if s.startswith("❯"):
+            return needle in s
+    return False
+
+
+def deliver(dst: dict, text: str, msg: str, sid: str, who: str) -> str:
+    """Deliver one message to one pane. Returns "typed" or "queued".
+
+    Whether a pane is ready cannot be checked BEFORE writing. The state record only
+    updates when the target's own hook fires, so senders milliseconds apart all read
+    the stale "idle" and all type: measured with four concurrent sends, one became a
+    turn and three were left stranded as unsubmitted text on the prompt line —
+    visible on screen, absent from the transcript, silently lost. Locking alone does
+    not help, because the lag outlives the lock.
+
+    So the POST-condition is checked instead, which needs no guess about timing: if
+    the text is still on the prompt line afterwards, the Enter did not take. That
+    text is then cleared (ctrl-U) and the message is queued for the Stop hook, which
+    is a real channel into the session rather than keystrokes aimed at a TUI.
+    """
+    if not dst["win"]:
+        enqueue(sid, who, msg)
+        return "queued"
+
+    # A short, distinctive slice of the message — enough to recognise on the prompt
+    # line, short enough to survive the pane being narrow enough to wrap.
+    needle = " ".join(msg.split())[:24]
+
+    with file_lock(f"send-{dst['win']}", timeout=5.0):
+        _paste_and_submit(dst["win"], text)
+        stranded = needle and input_line_holds(dst["win"], needle)
+        if stranded:
+            # ctrl-U clears the line, so the failed attempt is not left for the user
+            # to submit later out of context, or prepended to whatever they type.
+            kitty("send-text", "--match", f"id:{dst['win']}", "--", "\\x15", check=False)
+
+    if not window_exists(dst["win"]):
+        if sid:
+            enqueue(sid, who, msg)
+            return "queued"
+        die(f"win {dst['win']} disappeared while sending — message lost")
+    if stranded:
+        if not sid:
+            die(f"win {dst['win']} did not accept the message (it is mid-turn) and has "
+                f"no session id to queue against")
+        enqueue(sid, who, msg)
+        return "queued"
+    return "typed"
+
+
 def type_into(win_id: int, text: str) -> bool:
     """Paste text into a pane and submit it, as a user pressing Enter would.
 
@@ -241,15 +315,15 @@ def type_into(win_id: int, text: str) -> bool:
     `auto` rather than `enable` because a plain shell has paste mode off, and
     sending the markers to it would leave literal escape junk on the line.
     """
-    subprocess.run(
-        [kitty_bin(), "@", "send-text", "--match", f"id:{win_id}",
-         "--bracketed-paste", "auto", "--stdin"],
-        input=text, text=True, capture_output=True,
-    )
-    # Enter goes as its own write. The paste above is a single unit to the TUI,
-    # so no sleep is needed between them — the guessed delay this replaces was
-    # only ever compensating for keystroke-by-keystroke delivery.
-    kitty("send-text", "--match", f"id:{win_id}", "--", "\\r", check=False)
+    # Locked per target pane, because the paste and the Enter are two separate
+    # writes and the pair is not atomic. Two senders hitting one pane at the same
+    # moment interleave between them, so both pastes land on one input line and
+    # submit as a single turn — observed as
+    #   "cx/a: MSG-ALPHA...cx/a: MSG-BRAVO..."
+    # which loses a message. Bracketed paste makes each paste atomic; only a lock
+    # makes the paste-then-submit sequence atomic.
+    with file_lock(f"send-{win_id}", timeout=5.0):
+        _paste_and_submit(win_id, text)
     # Checking the pane still exists is the strongest cheap confirmation available.
     # Reading the screen back would be stronger but is unreliable: by the time it
     # could be read the TUI has usually submitted and cleared the input line.
@@ -513,21 +587,20 @@ def transcript_last_line(path: str) -> str:
     return ""
 
 
-class registry_lock:
-    """Serialise the read-modify-write in cmd_register.
+class file_lock:
+    """A cross-process lock, used for the two things here that are not atomic.
 
-    Choosing a slot means reading every existing record and picking a free number.
-    A grid registers all its panes at once, so without this they all read the same
-    snapshot and all pick the same slot — observed giving three panes slot 1, which
-    makes `cx send 1` ambiguous.
-
-    O_EXCL creation is the lock: it is atomic on every filesystem that matters here,
+    O_EXCL creation is the lock: atomic on every filesystem that matters here,
     needs no library, and leaves a file whose mtime says when it was taken so a
-    crashed holder cannot wedge registration forever.
+    crashed holder cannot wedge things forever.
+
+    Both callers must degrade rather than fail — registration must never block a
+    session from starting, and a send must never be dropped just because a lock was
+    contended — so timing out proceeds unlocked instead of raising.
     """
 
-    def __init__(self, timeout: float = 2.0):
-        self.path = os.path.join(STATE_DIR, "register.lock")
+    def __init__(self, name: str = "register", timeout: float = 2.0):
+        self.path = os.path.join(STATE_DIR, f"{name}.lock")
         self.timeout = timeout
         self.fd = None
 
@@ -992,27 +1065,26 @@ def cmd_send(argv: list[str]) -> int:
                 f"refusing, in case two sessions are replying to each other in a loop. "
                 f"Use --force if this is deliberate.")
 
-    # Queue when asked, when the target is busy, or when it has no pane to type
-    # into at all. All three need a session id: without one there is no inbox to
-    # queue to and no Stop hook that would drain it.
-    if sid and (force_queue or state in BUSY_STATES or not dst["win"]):
+    # An explicit --queue, or no pane to type into, is decided here. Everything
+    # else goes through deliver(), which re-checks busy-ness INSIDE the pane's send
+    # lock — the check cannot be made out here, because concurrent senders would
+    # all read "idle" before any of them writes.
+    if sid and (force_queue or not dst["win"]):
         enqueue(sid, who, msg)
         pending = len(os.listdir(inbox_path(sid)))
-        why = "queued" if force_queue else (f"busy ({state})" if state in BUSY_STATES else "no pane")
+        why = "queued" if force_queue else "no pane"
         print(f"cx: {label} {why} — queued, delivered on its next Stop "
               f"({pending} pending)")
         return 0
 
     require_pane(dst)
-    if not type_into(dst["win"], text):
-        # The pane went away mid-send. Queue it if there is a session to queue to,
-        # so the message is not lost to a pane that closed a moment too early.
-        if sid:
-            enqueue(sid, who, msg)
-            die(f"{label} (win {dst['win']}) disappeared while sending — "
-                f"queued instead, for delivery if it comes back")
-        die(f"{label} (win {dst['win']}) disappeared while sending — message lost")
-    print(f"cx: typed into {label}, win {dst['win']}")
+    how = deliver(dst, text, msg, sid, who)
+    if how == "queued":
+        pending = len(os.listdir(inbox_path(sid))) if sid else 0
+        print(f"cx: {label} was busy — queued, delivered on its next Stop "
+              f"({pending} pending)")
+    else:
+        print(f"cx: typed into {label}, win {dst['win']}")
     return 0
 
 
@@ -1298,28 +1370,56 @@ def cmd_focus(argv: list[str]) -> int:
 
 
 def cmd_name(argv: list[str]) -> int:
+    """Rename a pane, i.e. give it a new subject.
+
+    Takes `<label>` or `<label>.<index>`: a bare label keeps the pane's current
+    index, so renaming one pane of a grid does not collide with its siblings.
+    Renaming rewrites the SUBJECT, because that is the address `cx ls` prints and
+    `cx send` accepts — writing only the old `name` field would leave the pane
+    looking unchanged.
+    """
     if len(argv) != 2:
-        die("usage: cx name <slot|name|wID> <new-name>")
+        die("usage: cx name <who> <new-label>[.<index>]")
     dst = resolve(argv[0])
-    new = argv[1]
+    if not dst["win"]:
+        die("cannot rename a session with no pane of its own")
+    new = argv[1].strip().lstrip(".")
+    if is_pattern(new):
+        die("a name cannot contain '*' or '>' — those are pattern characters")
+
+    old = dst.get("subject") or ""
+    old_index = old.rsplit(".", 1)[-1] if old.count(".") >= 2 else "1"
+    if "." in new:
+        label, _, idx = new.rpartition(".")
+        if not idx.isdigit():
+            die(f"'{new}' must be <label> or <label>.<index> with a numeric index")
+    else:
+        label, idx = new, old_index
+    subject = subject_of(label, int(idx))
+
     reg = registry()
     rec = reg.get(dst["win"]) or {
         "kitty_window_id": dst["win"],
-        "session_id": "",
+        "session_id": dst.get("session_id", ""),
         "cwd": dst["cwd"],
         "started": int(time.time()),
     }
-    taken = {r.get("name") for w, r in reg.items() if w != dst["win"]}
-    if new in taken:
-        die(f"name '{new}' already used by another pane")
-    rec["name"] = new
+    taken = {r.get("subject") for w, r in reg.items() if w != dst["win"]}
+    if subject in taken:
+        die(f"'{short_subject(subject)}' is already used by another pane")
+    rec["subject"] = subject
+    rec["name"] = short_subject(subject)
     rec.setdefault("slot", dst["slot"])
     write_record(rec)
-    # Deliberately not touching the kitty window title: kitty-agent-title owns
-    # it (it re-renders "C <repo>/<branch> <state>" on every hook event and sets
-    # it permanently), so anything cx wrote there would be overwritten within
-    # seconds. The name lives in the registry and shows up in `cx ls`.
-    print(f"cx: slot {rec['slot']} (win {dst['win']}) is now '{new}'")
+    # Deliberately not touching the kitty window title: kitty-agent-title owns it
+    # and re-renders it on every hook event, so anything written here would be
+    # overwritten within seconds. It reads CX_NAME from the pane's environment,
+    # which cannot be changed after launch — so the title keeps the launch-time
+    # subject until the session restarts. Said plainly rather than left surprising.
+    print(f"cx: win {dst['win']} is now '{short_subject(subject)}'"
+          + (f" (was '{short_subject(old)}')" if old else "")
+          + "\ncx: the kitty tab title still shows the launch-time name — it comes "
+            "from the pane's environment, which cannot be rewritten after launch.")
     return 0
 
 
@@ -1355,7 +1455,7 @@ def cmd_register(argv: list[str]) -> int:
     # Everything from here to write_record is a read-modify-write over the shared
     # registry, so it is done under the lock: concurrent grid registrations
     # otherwise read one snapshot and pick the same slot and index.
-    with registry_lock():
+    with file_lock("register"):
         return _register_locked(wid_i, payload)
 
 
@@ -1627,7 +1727,7 @@ def cmd_help(argv: list[str]) -> int:
         "  peek <who> [n] [--sidechain]  print its last n conversation turns\n"
         "                            [--screen: the raw pane instead] [--all: scrollback]\n"
         "  focus <who>               jump kitty focus there\n"
-        "  name <who> <new>          (re)name a pane in the registry\n"
+        "  name <who> <new>          rename a pane: <label> keeps its index,\n                            <label>.<index> sets both\n"
         "  me                        this pane's slot/name/session id\n"
         "  drain                     Stop-hook entry point: deliver queued messages\n"
         "  gc [-n]                   forget dead panes, old records and stale queues\n"
