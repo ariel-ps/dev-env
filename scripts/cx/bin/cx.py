@@ -1328,8 +1328,13 @@ def cmd_me(argv: list[str]) -> int:
     me = self_row(rows)
     if not me:
         die("cannot identify this pane (KITTY_WINDOW_ID unset and `kitty @ ls --self` failed)")
-    print(f"slot={me['slot']} name={me['name'] or '-'} win={me['win']} "
-          f"session={me['session_id'] or '-'} cwd={me['cwd']}")
+    # Subject first: it is the address other sessions use, and it is the thing a
+    # session asked "who are you?" needs to answer. Asked that, four grid panes
+    # instead went grepping the repo — the identity was in their environment and
+    # on their statusline the whole time, but nothing here stated it plainly.
+    subj = me.get("subject") or ""
+    print(f"subject={short_subject(subj) or '-'} full={subj or '-'} slot={me['slot']} "
+          f"win={me['win']} session={me['session_id'] or '-'} cwd={me['cwd']}")
     return 0
 
 
@@ -1394,6 +1399,38 @@ def _register_locked(wid_i: int, payload: dict) -> int:
         name = short_subject(subject)
     else:
         subject = rec.get("subject") or subject_of(name, 1)
+    # Tell the session who it is. Without this a pane has no idea it is part of a
+    # grid, what its own subject is, or that cx exists: asked "what is your cx
+    # subject?", four panes each went grepping the repo for an answer that was in
+    # their own environment. SessionStart accepts additionalContext, which is the
+    # only channel that reaches the model itself rather than just the terminal.
+    #
+    # Deliberately short — it is prepended to every session, so it costs tokens
+    # whether or not that session ever talks to another one.
+    peers = sorted(
+        short_subject(r["subject"]) for w, r in reg.items()
+        if w != wid_i and r.get("subject")
+    )
+    context = (
+        f"You are one of several agent sessions sharing this machine, addressable "
+        f"over `cx` (see `cx help`). Your own subject is `{short_subject(subject)}` "
+        f"(fully qualified: `{subject}`).\n"
+        f"- `cx ls` lists the others; a message that arrives prefixed `cx/<sender>:` "
+        f"came from one of them, and you reply with `cx send <sender> \"...\"`.\n"
+        # Taken from the subject, not from `label`, which only exists on the branch
+        # that had to compute a new name.
+        f"- Subjects are NATS-style `<label>.<index>`: "
+        f"`{subject.split('.')[1] if len(subject.split('.')) > 2 else '<label>'}.*` "
+        f"is every pane of your group, `>` is everything.\n"
+        + (f"- Currently also running: {', '.join(peers)}.\n" if peers else "")
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    }))
+
     write_record(
         {
             "kitty_window_id": wid_i,
