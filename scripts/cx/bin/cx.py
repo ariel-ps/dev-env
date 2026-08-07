@@ -255,9 +255,15 @@ def deliver(dst: dict, text: str, msg: str, sid: str, who: str) -> str:
     Whether a pane is ready cannot be checked BEFORE writing. The state record only
     updates when the target's own hook fires, so senders milliseconds apart all read
     the stale "idle" and all type: measured with four concurrent sends, one became a
-    turn and three were left stranded as unsubmitted text on the prompt line —
-    visible on screen, absent from the transcript, silently lost. Locking alone does
-    not help, because the lag outlives the lock.
+    turn immediately and three sat as unsubmitted text on the prompt line. Locking
+    alone does not help, because the lag outlives the lock.
+
+    Those three were NOT lost — Claude Code buffers input typed mid-turn and submits
+    it once the turn ends, and every one of 21 test messages did eventually reach its
+    target. What is wrong is that arrival becomes unbounded and unordered, and a
+    message can sit visible-but-unsent for as long as the turn runs. Queueing makes
+    delivery a contract (a Stop hook returning it as a turn) instead of text left on
+    a prompt line hoping to be submitted.
 
     So the POST-condition is checked instead, which needs no guess about timing: if
     the text is still on the prompt line afterwards, the Enter did not take. That
