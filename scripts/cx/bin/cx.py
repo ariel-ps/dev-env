@@ -165,6 +165,97 @@ def is_pattern(s: str) -> bool:
     return "*" in s or ">" in s
 
 
+# --------------------------------------------------------------------------
+# hierarchy
+# --------------------------------------------------------------------------
+# The subject tree is also the authority tree: a subject's parent is its prefix,
+# so `proj` is above `proj.api`, which is above `proj.api.3`.
+#
+# Which directions are permitted is policy, set by CX_POLICY (or ~/.claude/cx/policy):
+#
+#   down-siblings  (default) down to any descendant, sideways to a same-parent
+#                  sibling. Never up, never to a cousin. Parent->child->parent
+#                  cannot cycle; siblings still can, which is why the rate cap stays.
+#   down-replies   down to any descendant, and up ONLY as a reply to a request that
+#                  session actually received. Cycles need a pending request, and a
+#                  request is consumed when answered.
+#   down           strictly down. Provably acyclic; `cx ask` cannot return an answer.
+#   open           no restriction (how cx behaved before this existed).
+#
+# The host token is a location, not a level, so it is stripped before comparing;
+# two subjects on different hosts are only related if their paths are.
+
+POLICIES = ("down-siblings", "down-replies", "down", "open")
+
+
+def policy() -> str:
+    """Active hierarchy policy: CX_POLICY, else a policy file, else the default."""
+    p = (os.environ.get("CX_POLICY") or "").strip().lower()
+    if not p:
+        try:
+            with open(os.path.join(STATE_DIR, "policy")) as fh:
+                p = fh.read().strip().lower()
+        except OSError:
+            p = ""
+    if p and p not in POLICIES:
+        die(f"unknown CX_POLICY '{p}' (choose one of: {', '.join(POLICIES)})")
+    return p or "down-siblings"
+
+
+def subject_path(subject: str) -> list[str]:
+    """The hierarchy part of a subject: its tokens with the host removed."""
+    parts = subject.split(".")
+    if parts and parts[0] == host_token():
+        parts = parts[1:]
+    return [p for p in parts if p]
+
+
+def hierarchy_check(sender: str, target: str, replying: bool = False) -> tuple[bool, str]:
+    """(allowed, reason) under the active policy.
+
+    A missing sender subject is treated as the root. An unregistered pane — an
+    operator's own shell, or a session that started before the hooks — has no
+    subject and therefore no place in the tree; refusing it would lock the human
+    driving things out of their own grid.
+    """
+    pol = policy()
+    if pol == "open":
+        return True, "no restriction"
+    # A pane with no subject is outside the tree, not above or below it: an
+    # operator's own shell, or a session predating the hooks. Both directions are
+    # permitted, deliberately — an agent has to be able to report to the human, and
+    # the human has to be able to drive their own grid. This is the one hole in the
+    # policy, so it is stated rather than left to be discovered: registering that
+    # pane (giving it a subject) brings it under the rules.
+    if not sender:
+        return True, "sender is outside the subject tree (treated as operator)"
+    if not target:
+        return True, "target is outside the subject tree (treated as operator)"
+    s, t = subject_path(sender), subject_path(target)
+    if not s or not t:
+        return True, ""
+    if s == t:
+        return False, "that is this same session"
+
+    if t[: len(s)] == s:
+        return True, "descendant"
+    if pol == "down-siblings" and len(s) == len(t) and s[:-1] == t[:-1]:
+        return True, "sibling"
+    if pol == "down-replies" and replying and s[: len(t)] == t:
+        return True, "reply to an open request"
+
+    if s[: len(t)] == t:
+        return False, (f"'{'.'.join(t)}' is above '{'.'.join(s)}' — policy '{pol}' does "
+                       f"not allow messaging a parent"
+                       + (" except as a reply to an open request"
+                          if pol == "down-replies" else ""))
+    if len(s) == len(t) and s[:-1] == t[:-1]:
+        return False, (f"'{'.'.join(t)}' is a sibling of '{'.'.join(s)}' — policy "
+                       f"'{pol}' allows only downward messages")
+    return False, (f"'{'.'.join(t)}' is neither below '{'.'.join(s)}' nor a permitted "
+                   f"peer under policy '{pol}'")
+
+
 def trunc(s: str, width: int, left: bool = False) -> str:
     """Clip to width, marking the elided side with an ellipsis."""
     if len(s) <= width:
@@ -1030,6 +1121,22 @@ def cmd_send(argv: list[str]) -> int:
                 if not (me_row and r["win"] and r["win"] == me_row["win"])]
         if not hits:
             die(f"'{target}' matched only this pane — nothing to send to")
+        # A pattern is a broad address, so targets the policy forbids are skipped
+        # with a count rather than failing the whole fan-out.
+        if not force:
+            me_subj = (me_row or {}).get("subject") or ""
+            allowed, blocked = [], []
+            for r in hits:
+                ok, why = hierarchy_check(me_subj, r.get("subject") or "")
+                (allowed if ok else blocked).append((r, why))
+            if blocked:
+                print(f"cx: policy '{policy()}' skipped {len(blocked)} target(s): "
+                      + ", ".join(short_subject(r.get('subject') or '') for r, _ in blocked),
+                      file=sys.stderr)
+            if not allowed:
+                die(f"policy '{policy()}' forbids every target matching '{target}' "
+                    f"({blocked[0][1]})")
+            hits = [r for r, _ in allowed]
         # One rate check for the whole fan-out, then --force on each leg. Counting
         # each leg separately would spend a 9-pane grid's worth of allowance on a
         # single `cx send 'grid.*'`, so two of them would trip the runaway guard.
@@ -1063,6 +1170,20 @@ def cmd_send(argv: list[str]) -> int:
 
     if state == "ended":
         die(f"{label} has ended — nothing there to receive the message")
+
+    # Hierarchy comes before the rate cap: a refused direction is a policy error to
+    # report, not traffic to meter.
+    if not force:
+        me_subj = (self_row(rows) or {}).get("subject") or ""
+        dst_subj = dst.get("subject") or ""
+        # An upward message counts as a reply when the target has an unanswered
+        # request outstanding to this session.
+        ok, why = hierarchy_check(
+            me_subj, dst_subj, replying=has_open_request(dst_subj, me_subj)
+        )
+        if not ok:
+            die(f"refusing to send to {label}: {why}. "
+                f"Use --force to override, or set CX_POLICY (see `cx policy`).")
 
     if not force:
         ok, n = rate_check(who)
@@ -1429,6 +1550,75 @@ def cmd_name(argv: list[str]) -> int:
     return 0
 
 
+def has_open_request(from_subject: str, to_subject: str) -> bool:
+    """Did `from_subject` ask `to_subject` something that is still unanswered?
+
+    This is what makes the `down-replies` policy real rather than decorative: an
+    upward message is allowed only when the parent actually asked for one, and the
+    request stops counting the moment it is answered — so a reply cannot be used as
+    a standing licence to talk upward.
+    """
+    if not (from_subject and to_subject):
+        return False
+    want_from, want_to = short_subject(from_subject), short_subject(to_subject)
+    try:
+        names = os.listdir(MAIL_DIR)
+    except OSError:
+        return False
+    for fn in names:
+        if not fn.endswith(".json") or fn.endswith(".reply.json"):
+            continue
+        try:
+            with open(os.path.join(MAIL_DIR, fn)) as fh:
+                req = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if req.get("from") != want_from or req.get("to") != want_to:
+            continue
+        if not os.path.exists(os.path.join(MAIL_DIR, f"{req.get('id')}.reply.json")):
+            return True
+    return False
+
+
+def cmd_policy(argv: list[str]) -> int:
+    """Show or set the hierarchy policy.
+
+    Persisted as a plain file rather than in the pane registry: it governs every
+    session on the machine, not one pane, and it must be readable before any
+    registry exists.
+    """
+    if argv:
+        want = argv[0].strip().lower()
+        if want not in POLICIES:
+            die(f"unknown policy '{want}' (choose one of: {', '.join(POLICIES)})")
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "policy"), "w") as fh:
+            fh.write(want + "\n")
+        print(f"cx: policy set to '{want}'"
+              + ("  (CX_POLICY is set in this environment and overrides it)"
+                 if os.environ.get("CX_POLICY") else ""))
+        return 0
+
+    active = policy()
+    src = ("CX_POLICY" if os.environ.get("CX_POLICY")
+           else "policy file" if os.path.exists(os.path.join(STATE_DIR, "policy"))
+           else "default")
+    print(f"policy: {active}   (from {src})\n")
+    print("  down-siblings  down to any descendant, sideways to a same-parent sibling.")
+    print("                 Never up, never to a cousin. Parent->child->parent cannot")
+    print("                 cycle; siblings still can, so the send rate cap stays.")
+    print("  down-replies   down to any descendant, up only as a reply to a request")
+    print("                 that session received.")
+    print("  down           strictly down. Acyclic, but `cx ask` cannot answer.")
+    print("  open           no restriction.")
+    print("\n  set with: cx policy <name>   (or CX_POLICY=<name> for one session)")
+    print("  --force on a send overrides whatever is active.")
+    print("\n  A pane with no subject is outside the tree and always reachable in both")
+    print("  directions, so an agent can report to you and you can drive your grid.")
+    print("  Give that pane a subject (cx name) to bring it under the rules.")
+    return 0
+
+
 def cmd_me(argv: list[str]) -> int:
     rows = roster()
     me = self_row(rows)
@@ -1736,7 +1926,7 @@ def cmd_help(argv: list[str]) -> int:
         "  name <who> <new>          rename a pane: <label> keeps its index,\n                            <label>.<index> sets both\n"
         "  me                        this pane's slot/name/session id\n"
         "  drain                     Stop-hook entry point: deliver queued messages\n"
-        "  gc [-n]                   forget dead panes, old records and stale queues\n"
+        "  gc [-n]                   forget dead panes, old records and stale queues\n  policy [name]             show or set who may message whom (hierarchy rules)\n"
         "\n<who> is a subject (build.3), a subject pattern (build.*, *.1, >),\n"
         "a slot number, a name substring, or w<kitty-window-id>.\n"
         "A pattern sends to every match at once and always excludes this pane."
@@ -1755,6 +1945,7 @@ COMMANDS = {
     "me": cmd_me, "whoami": cmd_me,
     "register": cmd_register, "unregister": cmd_unregister,
     "drain": cmd_drain,
+    "policy": cmd_policy,
     "gc": cmd_gc,
     "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
 }
