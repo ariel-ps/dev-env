@@ -15,12 +15,14 @@ codex-danger() {
 # function via `zsh -lic` (so claude-danger/codex-danger resolve from rc),
 # then apply kitty's grid layout for equal-size panes.
 #
-# Panes are named <label>-1..<label>-N and titled with their number, matching
-# aoe-grid-claude-danger. <label> defaults to the current directory's name.
+# Panes are named <label>-1..<label>-N, matching aoe-grid-claude-danger, and each
+# gets its own background colour. <label> defaults to the current directory's name
+# (or "home" in $HOME). Address a pane by name: `cx send bench-3 "..."`.
 #
 # usage: kitty-grid-claude-danger [count] [label]
 #   kitty-grid-claude-danger            # 9 panes, named <cwd-name>-1..9
 #   kitty-grid-claude-danger 4 bench    # 4 panes, named bench-1..bench-4
+#   KITTY_GRID_NO_COLOR=1 kitty-grid-claude-danger   # skip the ~2.5s colouring
 #
 # DANGER: every pane runs an unsupervised agent with permission checks
 # bypassed (--dangerously-skip-permissions / --dangerously-bypass-approvals-
@@ -32,8 +34,16 @@ __kitty_agent_grid() {
     || { echo "kitty-grid-${cmd}: count must be a number, got: $want" >&2; return 1; }
 
   # Panes are identified as <label>-<i>, matching aoe-grid-claude-danger. Default
-  # to the cwd's name so a grid reads like the directory it works on.
-  label="${label:-${PWD:t}}"
+  # to the cwd's name so a grid reads like the directory it works on — except in
+  # $HOME, where that is the username: long, repeated N times, and saying nothing
+  # about what the grid is for.
+  if [[ -z "$label" ]]; then
+    if [[ "$PWD" == "$HOME" ]]; then
+      label=home
+    else
+      label="${PWD:t}"
+    fi
+  fi
   label="${label//[^A-Za-z0-9._-]/-}"
   [[ -n "$label" ]] \
     || { echo "kitty-grid-${cmd}: could not derive a usable label; pass one explicitly" >&2; return 1; }
@@ -54,15 +64,20 @@ __kitty_agent_grid() {
   # shell never sources. The agent then starts fine (claude is in ~/.local/bin)
   # but every node-based hook inside it dies with "node: command not found",
   # silently disabling those plugins for the whole session.
-  # Each pane is told its own identity at launch, via two env vars the pane's
-  # agent hooks read back:
-  #   KITTY_AGENT_TITLE_PREFIX — kitty-agent-title puts it in front of the title,
-  #     so the pane number survives ("3 C dev-env ⚙"). Setting titles after launch
-  #     instead does not work: the agent's first lifecycle hook overwrites them.
-  #   CX_NAME — cx register names the session this instead of guessing from cwd,
-  #     which would name every pane of a grid identically and then tell them apart
-  #     by a collision counter that never matches the pane number.
-  # One identity per pane as a result: pane 3 is <label>-3, titled "3 ...".
+  # Each pane is told its own name at launch via CX_NAME, which both the agent
+  # hooks read back:
+  #   cx register uses it instead of guessing from cwd — which labels every pane of
+  #     a grid identically (the cwd is shared) and then separates them by a name
+  #     collision counter that has nothing to do with the pane number.
+  #   kitty-agent-title uses it as the title, so `cx ls` and the tab bar show the
+  #     same string rather than two names for one pane.
+  # KITTY_AGENT_TITLE_PREFIX is set for the case where CX_NAME is absent; the name
+  # already ends in the pane number, so the title needs no separate one.
+  #
+  # NOT the cx slot. Slots are unique across every session on the machine, pane
+  # numbers only within their grid, so pane 2 wants slot 2 while an unrelated
+  # session already holds it — they cannot be made to agree. Address grid panes by
+  # name (`cx send <label>-2`); the slot is just a short integer for typing.
   local first_id
   first_id=$(kitty @ launch --type=tab --tab-title="$label" --cwd=current \
     --env "KITTY_AGENT_TITLE_PREFIX=1" --env "CX_NAME=${label}-1" \
@@ -77,6 +92,27 @@ __kitty_agent_grid() {
   done
 
   kitty @ goto-layout --match "window_id:$first_id" grid
+
+  # Give each pane its own background, so panes are told apart by colour as well
+  # as by number — the reason kitty-colorize-panes exists, and it was never wired
+  # to the launcher that creates the panes. After goto-layout, so the pane set is
+  # final. Costs ~2.5s for 9 panes (the theme GA searches ~400 palettes); set
+  # KITTY_GRID_NO_COLOR=1 to skip it.
+  #
+  # Best-effort throughout: it needs the theme cache (kitty-themes-sync) and lives
+  # in another profile's file, so a missing helper must not fail a launched grid.
+  if [[ -z "${KITTY_GRID_NO_COLOR:-}" ]] && (( $+functions[kitty-colorize-panes] )); then
+    # colorize wants a TAB id; first_id is a window id, and `window_id:` is the
+    # tab-matcher that resolves "the tab containing this window".
+    local tab_id
+    tab_id=$(kitty @ ls --match-tab "window_id:$first_id" 2>/dev/null | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+print(data[0]["tabs"][0]["id"]) if data else sys.exit(1)
+' 2>/dev/null)
+    [[ -n "$tab_id" ]] && kitty-colorize-panes "$tab_id" >/dev/null 2>&1
+  fi
+
   echo "kitty-grid-${cmd}: ${want}x ${cmd}, named ${label}-1..${label}-${want}, new tab, grid layout"
 }
 

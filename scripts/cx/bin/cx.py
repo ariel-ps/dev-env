@@ -909,9 +909,12 @@ def cmd_ask(argv: list[str]) -> int:
         f"-- when you have the answer, send it back by running: "
         f'cx answer {req_id} "<your answer>"'
     )
-    kitty("send-text", "--match", f"id:{dst['win']}", "--", prompt)
-    time.sleep(0.2)
-    kitty("send-text", "--match", f"id:{dst['win']}", "--", "\r")
+    # Same delivery path as cx send: this used its own copy of the old
+    # send-text-then-sleep-then-Enter sequence, which interprets escapes in the
+    # message (mangling paths, and submitting early on an interpreted newline) and
+    # guesses at a 200ms ingest delay.
+    if not type_into(dst["win"], prompt):
+        die(f"slot {dst['slot']} (win {dst['win']}) disappeared while asking")
     print(f"cx: asked slot {dst['slot']} ({dst['name'] or dst['title']}), "
           f"request {req_id}, waiting up to {timeout}s…", file=sys.stderr)
 
@@ -1131,7 +1134,18 @@ def cmd_register(argv: list[str]) -> int:
     cwd = payload.get("cwd") or os.getcwd()
     slot = rec.get("slot")
     if slot is None:
-        used = {r.get("slot") for r in reg.values()}
+        used = {r.get("slot") for r in reg.values() if r.get("slot") is not None}
+        # Deliberately NOT taken from the launcher's pane number. A slot is unique
+        # across every session on the machine, while a pane number is unique only
+        # within its grid, so the two cannot always agree: pane 2 of a grid wants
+        # slot 2, which an unrelated session already holds. Concurrent grid
+        # registrations also read this same snapshot and race, so honouring a
+        # requested number would align sometimes and not others — and a number that
+        # is only sometimes the pane number is worse than one that never is.
+        #
+        # The pane's NAME carries the pane number instead (CX_NAME, e.g. demo-2),
+        # it is what the title shows, and `cx send demo-2` addresses by it. The slot
+        # is just a short integer for typing.
         slot = next(i for i in range(1, 1000) if i not in used)
     name = rec.get("name")
     if not name:

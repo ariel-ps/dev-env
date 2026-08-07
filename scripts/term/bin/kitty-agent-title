@@ -102,15 +102,23 @@ if [ ${#BRANCH} -gt 24 ]; then
 fi
 
 case "$AGENT" in
-  claude) LABEL="C $REPO" ;;
-  codex) LABEL="X $REPO" ;;
-  *) LABEL="$AGENT $REPO" ;;
+  claude) WHO="C" ;;
+  codex) WHO="X" ;;
+  *) WHO="$AGENT" ;;
 esac
 
-# kitty-grid-* numbers its panes 1..N by setting the window title after launch;
-# this hook would overwrite that. Panes launched with
-# --env KITTY_AGENT_TITLE_PREFIX=<n> keep the number in front of the label.
-[ -n "${KITTY_AGENT_TITLE_PREFIX:-}" ] && LABEL="${KITTY_AGENT_TITLE_PREFIX} $LABEL"
+# CX_NAME is what a launcher already decided this pane is called, and it is the
+# name `cx ls` shows. Prefer it over the cwd's basename so the title and the name
+# are the same identity — otherwise a grid pane is "home-1" to cx and
+# "1 C ariel.zilbershteyin" in the tab bar, which is two names for one pane.
+# It already ends in the pane number, so KITTY_AGENT_TITLE_PREFIX is redundant
+# here and only applies when no CX_NAME was given.
+if [ -n "${CX_NAME:-}" ]; then
+  LABEL="$WHO ${CX_NAME}"
+else
+  LABEL="$WHO $REPO"
+  [ -n "${KITTY_AGENT_TITLE_PREFIX:-}" ] && LABEL="${KITTY_AGENT_TITLE_PREFIX} $LABEL"
+fi
 
 [ -n "$BRANCH" ] && LABEL="$LABEL/$BRANCH"
 
