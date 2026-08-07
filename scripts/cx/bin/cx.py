@@ -480,6 +480,7 @@ def roster(claude_only: bool = True) -> list[dict]:
     st_by_win = status_by_win()
     rows: list[dict] = []
     seen_sessions: set[str] = set()
+    live_wins: set[int] = set()
     for os_win in kitty_tree():
         for tab in os_win["tabs"]:
             for win in tab["windows"]:
@@ -495,6 +496,7 @@ def roster(claude_only: bool = True) -> list[dict]:
                 session_id = (rec or {}).get("session_id") or (st or {}).get("session_id") or ""
                 if session_id:
                     seen_sessions.add(session_id)
+                live_wins.add(wid)
                 rows.append(
                     {
                         "win": wid,
@@ -523,6 +525,12 @@ def roster(claude_only: bool = True) -> list[dict]:
         if sid in seen_sessions or st.get("state") == "ended":
             continue
         if now - st.get("ts", 0) > STALE_AFTER:
+            continue
+        # A record naming a window that the pane loop already accounted for is a
+        # previous occupant of that pane, not a session living somewhere else. Left
+        # in, it would appear as its own row carrying a live window id — and
+        # `cx send` to it would type into whoever holds that pane now.
+        if st.get("win") in live_wins:
             continue
         rows.append(
             {
@@ -1109,19 +1117,108 @@ def cmd_register(argv: list[str]) -> int:
 
 
 def cmd_unregister(argv: list[str]) -> int:
+    """SessionEnd hook entry point. Drops this pane's registration, then collects.
+
+    Collecting here is what keeps the state directory bounded without a cron job or
+    a daemon: session end is the moment something definitely became collectable,
+    it happens once per session rather than once per tool call, and nothing is
+    waiting on the result. Never allowed to fail the hook.
+    """
     wid = os.environ.get("KITTY_WINDOW_ID")
     if wid and wid.isdigit():
         drop_record(int(wid))
+    try:
+        _STATUS_CACHE_RESET()
+        cmd_gc(["--quiet"])
+    except Exception:
+        pass
     return 0
 
 
+def _STATUS_CACHE_RESET() -> None:
+    global _STATUS_CACHE
+    _STATUS_CACHE = None
+
+
+# A session that fired SessionEnd is definitively gone, so its record only needs
+# to outlive "what was that pane doing just now?".
+KEEP_ENDED = 3600
+# A record in any other state means the process died without firing SessionEnd, so
+# there is no positive statement that it is gone — give it much longer before
+# assuming so. Both bounds exist because every `cx ls` reads this whole directory.
+KEEP_ORPHANED = 24 * 3600
+# Queued messages for a session that never came back. Beyond this they will not be
+# wanted even if it does.
+KEEP_QUEUED = 7 * 24 * 3600
+
+
 def cmd_gc(argv: list[str]) -> int:
-    """Drop registry entries whose kitty pane is gone."""
-    live = {r["win"] for r in roster(claude_only=False)}
-    dropped = [w for w in registry() if w not in live]
-    for w in dropped:
-        drop_record(w)
-    print(f"cx: dropped {len(dropped)} stale entr{'y' if len(dropped) == 1 else 'ies'}")
+    """Drop stale pane registrations, state records and queued messages.
+
+    State records are written per session, not per pane, so they accumulate one
+    file per session forever unless pruned — and `status_records()` reads the whole
+    directory on every roster. A record is dead when its session has ended (or has
+    not been heard from in a long time) AND no live pane claims it.
+    """
+    now = time.time()
+    dry = "--dry-run" in argv or "-n" in argv
+
+    rows = roster(claude_only=False)
+    live_wins = {r["win"] for r in rows}
+    live_sids = {r["session_id"] for r in rows if r.get("session_id")}
+
+    dropped_panes = [w for w in registry() if w not in live_wins]
+    if not dry:
+        for w in dropped_panes:
+            drop_record(w)
+
+    dropped_state = []
+    for sid, rec in status_records().items():
+        if sid in live_sids:
+            continue
+        age = now - rec.get("ts", 0)
+        limit = KEEP_ENDED if rec.get("state") == "ended" else KEEP_ORPHANED
+        if age > limit:
+            dropped_state.append(sid)
+            if not dry:
+                try:
+                    os.remove(os.path.join(STATUS_DIR, f"{sid}.json"))
+                except OSError:
+                    pass
+
+    dropped_inbox = []
+    try:
+        inbox_sids = os.listdir(INBOX_DIR)
+    except OSError:
+        inbox_sids = []
+    for sid in inbox_sids:
+        d = os.path.join(INBOX_DIR, sid)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        if not names:
+            if not dry:
+                try:
+                    os.rmdir(d)
+                except OSError:
+                    pass
+            continue
+        for fn in names:
+            p = os.path.join(d, fn)
+            try:
+                if now - os.path.getmtime(p) > KEEP_QUEUED:
+                    dropped_inbox.append(f"{sid[:8]}/{fn}")
+                    if not dry:
+                        os.remove(p)
+            except OSError:
+                pass
+
+    if "--quiet" not in argv:
+        prefix = "would drop" if dry else "dropped"
+        print(f"cx: {prefix} {len(dropped_panes)} pane registration(s), "
+              f"{len(dropped_state)} state record(s), "
+              f"{len(dropped_inbox)} queued message(s)")
     return 0
 
 

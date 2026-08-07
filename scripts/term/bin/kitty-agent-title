@@ -37,24 +37,57 @@ esac
 AGENT=${1:-agent}
 PAYLOAD=$(cat 2>/dev/null || true)
 
-json_value() {
-  [ -n "$PAYLOAD" ] || return 0
-  printf '%s' "$PAYLOAD" | jq -r --arg key "$1" '.[$key] // empty' 2>/dev/null
-}
-
-EVENT=$(json_value hook_event_name)
-CWD=$(json_value cwd)
+# PreToolUse hooks run synchronously — Claude Code waits for this before the tool
+# runs — so every subprocess here is latency added to every single tool call in
+# every session. That budget is why the four fields are pulled in ONE jq pass
+# instead of one call each, and why the git information below is read from the
+# filesystem rather than by running git. Measured: 165ms -> ~30ms.
+if [ -n "$PAYLOAD" ]; then
+  # Fields are joined on \x1f (unit separator), NOT tab. Tab counts as IFS
+  # whitespace, so `read` collapses runs of it into a single delimiter and drops
+  # empty fields — an absent transcript_path would then shift `message` into
+  # TRANSCRIPT and leave MESSAGE empty, silently mis-reporting every permission
+  # notification as a plain one. A non-whitespace IFS preserves empty fields.
+  # \x1f also cannot occur in the values, so nothing needs escaping.
+  IFS=$'\x1f' read -r EVENT CWD SESSION_ID TRANSCRIPT MESSAGE <<EOF
+$(printf '%s' "$PAYLOAD" | jq -j '
+  [.hook_event_name, .cwd, .session_id, .transcript_path, .message]
+  | map(. // "" | tostring | gsub("[\n\r]"; " ")) | join("")' 2>/dev/null)
+EOF
+else
+  EVENT="" CWD="" SESSION_ID="" TRANSCRIPT="" MESSAGE=""
+fi
 [ -n "$CWD" ] || CWD=$PWD
 
-# --show-toplevel resolves to the linked worktree's own root, which is what we
-# want to name the tab after (a worktree is usually a different branch/task).
-GIT_ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)
-BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null || true)
+# Repo + branch without invoking git: two git subprocesses cost ~98ms of the
+# hook's old 165ms, and this reproduces their answer in ~7ms.
+#
+# Walk up for .git, which lands on a linked worktree's own root the same way
+# `rev-parse --show-toplevel` does — a worktree has .git as a FILE, so -e (not
+# -d) is what matches both cases. Then read HEAD directly: "ref: refs/heads/x"
+# yields x, and a bare sha means detached, which has no branch name to show.
+GIT_DIR=$CWD
+while [ "$GIT_DIR" != "/" ] && [ -n "$GIT_DIR" ]; do
+  [ -e "$GIT_DIR/.git" ] && break
+  GIT_DIR=${GIT_DIR%/*}
+  [ -n "$GIT_DIR" ] || GIT_DIR=/
+done
 
-if [ -n "$GIT_ROOT" ]; then
-  REPO=$(basename "$GIT_ROOT")
+BRANCH=""
+if [ -e "$GIT_DIR/.git" ]; then
+  REPO=${GIT_DIR##*/}
+  if [ -d "$GIT_DIR/.git" ]; then
+    HEAD_FILE="$GIT_DIR/.git/HEAD"
+  else
+    # Worktree: .git is a file containing "gitdir: <path>", and HEAD lives there.
+    HEAD_FILE=$(cut -d' ' -f2- <"$GIT_DIR/.git" 2>/dev/null)/HEAD
+  fi
+  HEAD_REF=$(cat "$HEAD_FILE" 2>/dev/null || true)
+  case "$HEAD_REF" in
+    "ref: refs/heads/"*) BRANCH=${HEAD_REF#ref: refs/heads/} ;;
+  esac
 else
-  REPO=$(basename "$CWD")
+  REPO=${CWD##*/}
 fi
 
 # Mainline branches carry no information; prefixed branches are shortened to the
@@ -92,7 +125,7 @@ case "$EVENT" in
   # Notification carries the reason in .message; permission_prompt means the
   # agent is blocked on the user, idle_prompt means it is just sitting there.
   Notification)
-    case "$(json_value message)" in
+    case "$MESSAGE" in
       *ermission* | *pproval* | *licitation*) MARK="❓" STATE="waiting" ;;
       *) MARK="🔔" STATE="notify" ;;
     esac
@@ -124,7 +157,6 @@ fi
 # pane. Keyed by session_id rather than kitty window id because a session running
 # under tmux (aoe-grid-*) has no window id to key on — the claude process is a
 # child of the tmux server, not of the pane.
-SESSION_ID=$(json_value session_id)
 if [ -n "$SESSION_ID" ]; then
   case "$SESSION_ID" in
     # A session id lands in a filename, so refuse anything that is not the
@@ -134,19 +166,23 @@ if [ -n "$SESSION_ID" ]; then
       CX_DIR="${CX_STATE_DIR:-$HOME/.claude/cx}/state"
       if mkdir -p "$CX_DIR" 2>/dev/null; then
         CX_TMP="$CX_DIR/.$SESSION_ID.$$"
+        # Builtins rather than `hostname` and `date` subprocesses. HOSTNAME is set
+        # by every bash back to 3.2; EPOCHSECONDS only from 5.0, and the shebang
+        # resolves before this script can fix PATH, so macOS's /bin/bash 3.2 is
+        # reachable and needs the fallback.
         if jq -n \
           --arg session_id "$SESSION_ID" \
           --arg agent "$AGENT" \
-          --arg host "$(hostname -s 2>/dev/null || echo '?')" \
+          --arg host "${HOSTNAME%%.*}" \
           --arg win "${KITTY_WINDOW_ID:-}" \
           --arg cwd "$CWD" \
           --arg repo "$REPO" \
           --arg branch "$BRANCH" \
           --arg state "$STATE" \
           --arg event "$EVENT" \
-          --arg transcript "$(json_value transcript_path)" \
+          --arg transcript "$TRANSCRIPT" \
           --arg title "$TITLE" \
-          --argjson ts "$(date +%s)" \
+          --argjson ts "${EPOCHSECONDS:-$(date +%s)}" \
           '{$session_id, $agent, $host, $cwd, $repo, $branch, $state, $event,
             $transcript, $title, $ts, win: (if $win == "" then null else ($win | tonumber) end)}' \
           >"$CX_TMP" 2>/dev/null; then
