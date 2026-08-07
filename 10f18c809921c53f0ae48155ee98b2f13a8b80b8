@@ -1,0 +1,73 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "2.0.0",
+  "base_commit_sha": "10f18c809921c53f0ae48155ee98b2f13a8b80b8",
+  "prompts": {
+    "51681f4a2d48de9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6b4e0684-bb3b-4ed6-8464-287e664afe67",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 0,
+      "accepted_lines": 4,
+      "overriden_lines": 0
+    },
+    "97a653e91405481e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f9a005e5-e50b-400f-abcc-6fc992c8c86c",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 112,
+      "total_deletions": 11,
+      "accepted_lines": 80,
+      "overriden_lines": 4
+    },
+    "ad80faaaae47e517": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ca203a5b-6112-42d4-ab73-62682afe5366",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 276,
+      "total_deletions": 185,
+      "accepted_lines": 268,
+      "overriden_lines": 4
+    },
+    "e527b57534c8c864": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "adcd412e-5923-4153-a5b9-9eb9d3d119c0",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 69,
+      "total_deletions": 4,
+      "accepted_lines": 65,
+      "overriden_lines": 1
+    },
+    "f1f0cd8713147f7b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "82f1de8a-aa6b-4c98-a786-296bc3c7313e",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ariel-ps <ariel@prompt.security>",
+      "messages": [],
+      "total_additions": 64,
+      "total_deletions": 32,
+      "accepted_lines": 53,
+      "overriden_lines": 0
+    }
+  }
+}
