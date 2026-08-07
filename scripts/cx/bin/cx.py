@@ -210,6 +210,123 @@ def record_status(rec: dict) -> tuple[str, str]:
     return state, f"{rec.get('event') or '?'} {human_age(age)} ago"
 
 
+# --------------------------------------------------------------------------
+# transcript
+# --------------------------------------------------------------------------
+# The pane's screen is a rendering: wrapped to the pane's width, truncated to the
+# scrollback, interleaved with TUI furniture, and gone entirely for a session
+# running under tmux. The transcript JSONL is the conversation itself, so context
+# is read from there and the screen is kept only as a fallback.
+
+# Transcripts reach megabytes, and only the tail is ever wanted. Read backwards
+# from the end rather than parsing the whole file.
+TAIL_BYTES_LS = 64 * 1024
+TAIL_BYTES_PEEK = 512 * 1024
+
+
+def transcript_entries(path: str, max_bytes: int = TAIL_BYTES_PEEK) -> list[dict]:
+    if not path:
+        return []
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()  # discard the partial line the seek landed inside
+            raw = fh.read()
+    except OSError:
+        return []
+    out = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue  # a line being appended as we read; skip it
+    return out
+
+
+def flatten(content) -> str:
+    """Best-effort single string out of a content block's payload."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                parts.append(b.get("text") or "")
+            elif isinstance(b, str):
+                parts.append(b)
+        return " ".join(p for p in parts if p)
+    return ""
+
+
+# The field that actually says what a tool call is doing, per tool.
+TOOL_SALIENT = ("command", "file_path", "pattern", "path", "url", "prompt", "description")
+
+
+def tool_brief(inp) -> str:
+    if not isinstance(inp, dict):
+        return ""
+    for key in TOOL_SALIENT:
+        val = inp.get(key)
+        if isinstance(val, str) and val.strip():
+            return " ".join(val.split())
+    return ""
+
+
+def transcript_turns(entries: list[dict], sidechain: bool = False) -> list[tuple[str, str]]:
+    """(speaker, text) in order. Tool calls collapse to one line each.
+
+    tool_result blocks are dropped unless they errored: they are the bulk of a
+    transcript by volume and almost never what you want when catching up on what
+    another session is doing.
+
+    thinking blocks are dropped because the text is not there to show — Claude
+    Code persists the block with its signature and an empty `thinking` field
+    (0 non-empty out of 313 blocks across four transcripts).
+    """
+    turns: list[tuple[str, str]] = []
+    for e in entries:
+        if e.get("isSidechain") and not sidechain:
+            continue
+        if e.get("type") not in ("user", "assistant"):
+            continue
+        content = (e.get("message") or {}).get("content")
+        if isinstance(content, str):
+            if content.strip():
+                turns.append(("you", content))
+            continue
+        for block in content or []:
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type")
+            if bt == "text":
+                if (block.get("text") or "").strip():
+                    turns.append(("claude", block["text"]))
+            elif bt == "tool_use":
+                brief = tool_brief(block.get("input"))
+                turns.append(("tool", f"{block.get('name') or '?'}({brief})" if brief
+                              else f"{block.get('name') or '?'}"))
+            elif bt == "tool_result" and block.get("is_error"):
+                turns.append(("error", flatten(block.get("content"))))
+    return turns
+
+
+def transcript_last_line(path: str) -> str:
+    """One line describing where the conversation currently is, for `cx ls`."""
+    turns = transcript_turns(transcript_entries(path, TAIL_BYTES_LS))
+    for speaker, text in reversed(turns):
+        if speaker in ("claude", "you", "error"):
+            first = next((ln for ln in text.splitlines() if ln.strip()), "")
+            if first:
+                return f"{speaker}: {' '.join(first.split())}"
+        if speaker == "tool":
+            return f"→ {text}"
+    return ""
+
+
 def write_record(rec: dict) -> None:
     os.makedirs(PANES_DIR, exist_ok=True)
     path = os.path.join(PANES_DIR, f"{rec['kitty_window_id']}.json")
@@ -491,6 +608,13 @@ def cmd_ls(argv: list[str]) -> int:
     print(f"{'':2}{'SLOT':>4}  {'NAME':<22} {'WIN':>4} {'STATUS':<8} {'CWD':<24} LAST")
     for r in rows:
         st, last = status_of(r["win"], r.get("session_id", ""))
+        # status_of returns "<event> <age> ago" for record-backed rows; the
+        # transcript says something more useful if it is available.
+        rec = status_records().get(r.get("session_id") or "")
+        if rec and rec.get("transcript"):
+            from_transcript = transcript_last_line(rec["transcript"])
+            if from_transcript:
+                last = from_transcript
         mark = "*" if me and r["win"] == me["win"] else " "
         cwd = r["cwd"].replace(os.path.expanduser("~"), "~")
         name = (r["name"] or r["title"] or "-") + ("" if r["registered"] else "~")
@@ -678,19 +802,72 @@ def cmd_inbox(argv: list[str]) -> int:
     return 0
 
 
+SPEAKER_WIDTH = 7
+
+
+def transcript_of(dst: dict) -> str:
+    """The session's transcript path, from either registry or state record."""
+    sid = dst.get("session_id") or ""
+    rec = status_records().get(sid) or {}
+    if rec.get("transcript"):
+        return rec["transcript"]
+    for pane_rec in registry().values():
+        if pane_rec.get("session_id") == sid and pane_rec.get("transcript"):
+            return pane_rec["transcript"]
+    return ""
+
+
 def cmd_peek(argv: list[str]) -> int:
     if not argv:
-        die("usage: cx peek <slot|name> [lines] [--all]")
-    extent = "all" if "--all" in argv else "screen"
-    argv = [a for a in argv if a != "--all"]
-    n = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 40
-    dst = require_pane(resolve(argv[0]))
-    txt = pane_screen(dst["win"], extent=extent)
-    lines = [ln.rstrip() for ln in txt.splitlines()]
-    while lines and not lines[-1]:
-        lines.pop()
-    print(f"--- slot {dst['slot']} ({dst['name'] or dst['title']}) win {dst['win']} ---")
-    print("\n".join(lines[-n:]))
+        die("usage: cx peek <slot|name> [turns] [--screen] [--all] [--sidechain]")
+    flags = {a for a in argv if a.startswith("--")}
+    argv = [a for a in argv if not a.startswith("--")]
+    if not argv:
+        die("usage: cx peek <slot|name> [turns] [--screen] [--all] [--sidechain]")
+    n = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 12
+
+    dst = resolve(argv[0])
+    st, age = status_of(dst["win"], dst.get("session_id", ""))
+    head = f"── slot {dst['slot']}  {dst['name'] or dst['title'] or '-'}  {st} ({age})"
+
+    # --screen forces the old behaviour: kitty's rendering of the pane, wrapped
+    # and scrollback-limited, TUI chrome and all. Needs a real pane.
+    if "--screen" in flags:
+        dst = require_pane(dst)
+        txt = pane_screen(dst["win"], extent="all" if "--all" in flags else "screen")
+        lines = [ln.rstrip() for ln in txt.splitlines()]
+        while lines and not lines[-1]:
+            lines.pop()
+        print(f"{head}  [pane {dst['win']} screen] ──")
+        print("\n".join(lines[-(n if n > 12 else 40):]))
+        return 0
+
+    path = transcript_of(dst)
+    if not path or not os.path.exists(path):
+        # No transcript means no record and no registration, so fall back rather
+        # than fail — but say which source is being shown, since they differ.
+        if not dst.get("win"):
+            die(f"slot {dst['slot']} has neither a transcript nor a pane to read")
+        print(f"{head}  [no transcript — falling back to pane {dst['win']} screen] ──")
+        txt = pane_screen(dst["win"])
+        print("\n".join(ln.rstrip() for ln in txt.splitlines() if ln.strip())[-4000:])
+        return 0
+
+    turns = transcript_turns(transcript_entries(path), sidechain="--sidechain" in flags)
+    if not turns:
+        print(f"{head}  [transcript has no conversation yet] ──")
+        return 0
+
+    print(f"{head}  [transcript, last {min(n, len(turns))} of {len(turns)} turns] ──")
+    for speaker, text in turns[-n:]:
+        body = text.strip()
+        if speaker == "tool":
+            print(f"{'→':>{SPEAKER_WIDTH}} {trunc(body, 100)}")
+            continue
+        lines = [ln for ln in body.splitlines()]
+        print(f"{speaker + ':':>{SPEAKER_WIDTH}} {lines[0] if lines else ''}")
+        for ln in lines[1:]:
+            print(f"{'':>{SPEAKER_WIDTH}} {ln}")
     return 0
 
 
