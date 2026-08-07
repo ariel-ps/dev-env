@@ -1178,8 +1178,37 @@ def require_pane(dst: dict) -> dict:
 
 
 def self_row(rows: list[dict] | None = None) -> dict | None:
-    """The row for the pane this command is running in, via kitty's own --self."""
+    """The row for the pane this command is running in, via kitty's own --self.
+
+    A subagent gets its PARENT's row with `.sub` appended to the subject, which puts
+    it directly below the pane that spawned it. Without that it had no subject at
+    all, and a sender with no subject is treated as the operator and exempt from the
+    hierarchy — so a pane forbidden from messaging a sibling could spawn a subagent
+    and send from there. Verified before this existed: the pane was denied and its
+    subagent allowed, for the same send.
+
+    A subagent is identified by CLAUDE_CODE_CHILD_SESSION, which Claude Code sets in
+    its environment; it inherits CLAUDE_SESSION_ID from its parent and has no
+    KITTY_WINDOW_ID of its own, so it is otherwise indistinguishable from a pane that
+    simply is not in kitty.
+    """
     rows = rows if rows is not None else roster()
+
+    if os.environ.get("CLAUDE_CODE_CHILD_SESSION"):
+        parent_sid = os.environ.get("CLAUDE_SESSION_ID") or ""
+        for r in rows:
+            if parent_sid and r.get("session_id") == parent_sid:
+                sub = dict(r)
+                sub["subject"] = f"{r['subject']}.sub" if r.get("subject") else ""
+                sub["name"] = short_subject(sub["subject"]) or f"{r.get('name','?')}.sub"
+                # No pane of its own: a subagent cannot be typed into, and must not
+                # inherit its parent's window or a message meant for it would land
+                # in the parent's prompt.
+                sub["win"] = 0
+                sub["detached"] = True
+                return sub
+        return None
+
     wid = os.environ.get("KITTY_WINDOW_ID")
     if wid and wid.isdigit():
         for r in rows:
