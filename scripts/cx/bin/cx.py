@@ -2310,7 +2310,16 @@ def cmd_gc(argv: list[str]) -> int:
     dry = "--dry-run" in argv or "-n" in argv
 
     rows = roster(claude_only=False)
-    live_wins = {r["win"] for r in rows}
+    # Live windows come from kitty, NOT from the roster: the roster includes rows
+    # contributed by the registry and by state records, so a stale record would
+    # appear in it and thereby vouch for its own liveness, making itself
+    # uncollectable.
+    live_wins = {
+        w["id"]
+        for osw in kitty_tree()
+        for tab in osw["tabs"]
+        for w in tab["windows"]
+    }
     live_sids = {r["session_id"] for r in rows if r.get("session_id")}
 
     live_panes = set()
