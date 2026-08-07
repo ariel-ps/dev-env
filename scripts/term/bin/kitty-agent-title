@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Set the kitty pane/tab title from an AI-agent lifecycle hook.
+#
+# Reads the hook's JSON payload on stdin and renders:
+#   "<agent letter> <repo>[/<branch>] <state emoji>"   e.g. "C ps-agent/PROE-7695 ⚙"
+#
+# Usage (from a hook command):  kitty-agent-title claude
+#                               kitty-agent-title codex
+#
+# Scope: sets the individual kitty *window* (pane) title by default, because a
+# splits layout puts several agents in one tab and set-tab-title would make them
+# fight over a single string. kitty's default tab_title_template is "{title}",
+# so the tab still shows the active pane's title. Override with
+#   export KITTY_AGENT_TITLE_SCOPE=tab
+# if you run one agent per tab and want the title to stick to the whole tab.
+#
+# The title is set *permanently* (no --temporary) on purpose. claude/codex both
+# emit their own OSC title sequences while they render, and a --temporary title
+# yields to the next program-set title, so it would survive for milliseconds.
+# The trade-off is that the override outlives the agent, so a flag file is left
+# behind for kitty-tab-title.sh to clear it at the next shell prompt.
+#
+# The OSC escape at the bottom is a fallback for non-kitty terminals only. In a
+# hook context /dev/tty is usually "device not configured" (the agent, not this
+# script, owns the pty), so it is not a reliable path here.
+
+set -u
+
+# Hooks can inherit a minimal PATH that lacks Homebrew, which is where kitten
+# lives on macOS. Without this the kitten @ calls silently fall through to the
+# OSC fallback.
+case ":$PATH:" in
+  *:/opt/homebrew/bin:*) ;;
+  *) PATH="/opt/homebrew/bin:$PATH" ;;
+esac
+
+AGENT=${1:-agent}
+PAYLOAD=$(cat 2>/dev/null || true)
+
+json_value() {
+  [ -n "$PAYLOAD" ] || return 0
+  printf '%s' "$PAYLOAD" | jq -r --arg key "$1" '.[$key] // empty' 2>/dev/null
+}
+
+EVENT=$(json_value hook_event_name)
+CWD=$(json_value cwd)
+[ -n "$CWD" ] || CWD=$PWD
+
+# --show-toplevel resolves to the linked worktree's own root, which is what we
+# want to name the tab after (a worktree is usually a different branch/task).
+GIT_ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)
+BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null || true)
+
+if [ -n "$GIT_ROOT" ]; then
+  REPO=$(basename "$GIT_ROOT")
+else
+  REPO=$(basename "$CWD")
+fi
+
+# Mainline branches carry no information; prefixed branches are shortened to the
+# part that identifies the work.
+case "$BRANCH" in
+  main | master | trunk | "") BRANCH="" ;;
+  feature/* | feat/* | fix/* | bugfix/* | chore/* | hotfix/*) BRANCH=${BRANCH#*/} ;;
+esac
+# Long ticket-style branches get truncated so the tab bar stays readable.
+if [ ${#BRANCH} -gt 24 ]; then
+  BRANCH="${BRANCH:0:23}…"
+fi
+
+case "$AGENT" in
+  claude) LABEL="C $REPO" ;;
+  codex) LABEL="X $REPO" ;;
+  *) LABEL="$AGENT $REPO" ;;
+esac
+
+# kitty-grid-* numbers its panes 1..N by setting the window title after launch;
+# this hook would overwrite that. Panes launched with
+# --env KITTY_AGENT_TITLE_PREFIX=<n> keep the number in front of the label.
+[ -n "${KITTY_AGENT_TITLE_PREFIX:-}" ] && LABEL="${KITTY_AGENT_TITLE_PREFIX} $LABEL"
+
+[ -n "$BRANCH" ] && LABEL="$LABEL/$BRANCH"
+
+case "$EVENT" in
+  SessionStart) MARK="🌱" ;;
+  UserPromptSubmit | PostToolUse) MARK="💭" ;;
+  PreToolUse) MARK="⚙" ;;
+  PermissionRequest) MARK="❓" ;;
+  # Notification carries the reason in .message; permission_prompt means the
+  # agent is blocked on the user, idle_prompt means it is just sitting there.
+  Notification)
+    case "$(json_value message)" in
+      *ermission* | *pproval* | *licitation*) MARK="❓" ;;
+      *) MARK="🔔" ;;
+    esac
+    ;;
+  Stop | SubagentStop) MARK="✔" ;;
+  StopFailure) MARK="✖" ;;
+  SessionEnd) MARK="💤" ;;
+  PreCompact | PostCompact) MARK="🧹" ;;
+  *) MARK="" ;;
+esac
+
+TITLE=$LABEL
+[ -n "$MARK" ] && TITLE="$TITLE $MARK"
+
+# KITTY_AGENT_TITLE_DEBUG=1 prints the computed title and skips the side effects,
+# so the mapping can be checked without a live kitty window.
+if [ -n "${KITTY_AGENT_TITLE_DEBUG:-}" ]; then
+  printf '%s\n' "$TITLE"
+  exit 0
+fi
+
+SCOPE=${KITTY_AGENT_TITLE_SCOPE:-window}
+SET_OK=
+
+if command -v kitten >/dev/null 2>&1; then
+  if [ "$SCOPE" = tab ]; then
+    kitten @ set-tab-title "$TITLE" >/dev/null 2>&1 ||
+      kitten @ --to "${KITTY_LISTEN_ON:-unix:@kitty}" set-tab-title "$TITLE" >/dev/null 2>&1 &&
+      SET_OK=1
+  else
+    kitten @ set-window-title "$TITLE" >/dev/null 2>&1 ||
+      kitten @ --to "${KITTY_LISTEN_ON:-unix:@kitty}" set-window-title "$TITLE" >/dev/null 2>&1 &&
+      SET_OK=1
+  fi
+fi
+
+# Breadcrumb so the shell prompt hook knows an override is in place and can clear
+# it — without paying for a kitten subprocess on every single prompt.
+if [ -n "$SET_OK" ] && [ -n "${KITTY_WINDOW_ID:-}" ]; then
+  FLAG_DIR="${TMPDIR:-/tmp}/kitty-agent-title"
+  mkdir -p "$FLAG_DIR" 2>/dev/null &&
+    : >"$FLAG_DIR/win-${KITTY_WINDOW_ID}.$SCOPE" 2>/dev/null || true
+fi
+
+# Fallback for non-kitty terminals: OSC 2 sets the window title, OSC 30 the tab
+# title. Skipped when kitten already did the job, since a program-set title would
+# just be redundant here.
+if [ -z "$SET_OK" ]; then
+  (
+    exec 2>/dev/null
+    printf '\033]2;%s\a' "$TITLE" >/dev/tty || true
+    [ "$SCOPE" = tab ] && printf '\033]30;%s\a' "$TITLE" >/dev/tty
+    true
+  ) || true
+fi
+
+exit 0
