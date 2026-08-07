@@ -187,6 +187,43 @@ def is_pattern(s: str) -> bool:
 
 POLICIES = ("down-siblings", "down-replies", "down", "open")
 
+# Sibling chat is the one direction `down-siblings` leaves open, and two siblings
+# replying to each other is a cycle. The rate cap bounds that at 20 exchanges per
+# five minutes, which is a lot of unattended tokens.
+#
+# So an immediate reciprocation is refused as well: if A messaged B recently, B may
+# not message A back within this window unless A has an unanswered request open to
+# B (i.e. A asked for a reply), or --force is given. Tight ping-pong becomes
+# impossible while request/reply and ordinary one-way traffic still work.
+RECIPROCAL_WINDOW = 90
+SENT_DIR = os.path.join(STATE_DIR, "sent")
+
+
+def record_send(sender: str, target: str) -> None:
+    """Note that sender messaged target, for the reciprocation check."""
+    if not (sender and target):
+        return
+    try:
+        os.makedirs(SENT_DIR, exist_ok=True)
+        key = f"{token(short_subject(sender))}__{token(short_subject(target))}"
+        with open(os.path.join(SENT_DIR, key), "w") as fh:
+            fh.write(f"{time.time():.3f}\n")
+    except OSError:
+        pass
+
+
+def sent_recently(sender: str, target: str) -> float:
+    """Seconds since sender last messaged target, or -1 if never/too old."""
+    if not (sender and target):
+        return -1
+    key = f"{token(short_subject(sender))}__{token(short_subject(target))}"
+    try:
+        with open(os.path.join(SENT_DIR, key)) as fh:
+            age = time.time() - float(fh.read().strip())
+    except (OSError, ValueError):
+        return -1
+    return age if age < RECIPROCAL_WINDOW else -1
+
 
 def policy() -> str:
     """Active hierarchy policy: CX_POLICY, else a policy file, else the default."""
@@ -240,6 +277,17 @@ def hierarchy_check(sender: str, target: str, replying: bool = False) -> tuple[b
     if t[: len(s)] == s:
         return True, "descendant"
     if pol == "down-siblings" and len(s) == len(t) and s[:-1] == t[:-1]:
+        # Refuse to complete a tight loop: the target messaged us moments ago and
+        # did not ask a question, so sending back would start a ping-pong that only
+        # the rate cap would stop.
+        age = sent_recently(target, sender)
+        if age >= 0 and not replying:
+            return False, (
+                f"'{'.'.join(t)}' messaged this session {int(age)}s ago and has no open "
+                f"request — refusing to send straight back, which is how two siblings "
+                f"start a loop. Wait {int(RECIPROCAL_WINDOW - age)}s, use `cx ask` if you "
+                f"need an answer, or --force"
+            )
         return True, "sibling"
     if pol == "down-replies" and replying and s[: len(t)] == t:
         return True, "reply to an open request"
@@ -1136,6 +1184,8 @@ def cmd_send(argv: list[str]) -> int:
             if not allowed:
                 die(f"policy '{policy()}' forbids every target matching '{target}' "
                     f"({blocked[0][1]})")
+            for r, _ in allowed:
+                record_send(me_subj, r.get("subject") or "")
             hits = [r for r, _ in allowed]
         # One rate check for the whole fan-out, then --force on each leg. Counting
         # each leg separately would spend a 9-pane grid's worth of allowance on a
@@ -1184,6 +1234,7 @@ def cmd_send(argv: list[str]) -> int:
         if not ok:
             die(f"refusing to send to {label}: {why}. "
                 f"Use --force to override, or set CX_POLICY (see `cx policy`).")
+        record_send(me_subj, dst_subj)
 
     if not force:
         ok, n = rate_check(who)
@@ -1886,18 +1937,19 @@ def cmd_gc(argv: list[str]) -> int:
                 pass
 
     # Rate logs are self-pruning per send, but a sender that stops sending leaves
-    # one behind forever.
-    try:
-        for fn in os.listdir(RATE_DIR):
-            p = os.path.join(RATE_DIR, fn)
-            try:
-                if now - os.path.getmtime(p) > SEND_WINDOW * 4:
-                    if not dry:
+    # one behind forever. Reciprocation markers stop mattering once their window has
+    # passed, so they go on the same sweep.
+    for d, keep in ((RATE_DIR, SEND_WINDOW * 4), (SENT_DIR, RECIPROCAL_WINDOW * 4)):
+        try:
+            for fn in os.listdir(d):
+                p = os.path.join(d, fn)
+                try:
+                    if now - os.path.getmtime(p) > keep and not dry:
                         os.remove(p)
-            except OSError:
-                pass
-    except OSError:
-        pass
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     if "--quiet" not in argv:
         prefix = "would drop" if dry else "dropped"
