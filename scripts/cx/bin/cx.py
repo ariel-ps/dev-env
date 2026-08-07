@@ -794,6 +794,26 @@ def cmd_drain(argv: list[str]) -> int:
     if not msgs:
         return 0
 
+    # Blocking on Stop means the session carries straight on working — but the
+    # title hook, firing on the same Stop, has just recorded it as idle, and
+    # nothing will contradict that: an injected turn raises no UserPromptSubmit,
+    # and a text-only reply raises no PreToolUse either. Observed leaving a
+    # session marked idle for the ~20s it spent answering. Left uncorrected, the
+    # next `cx send` sees idle and types into a busy TUI, which is the exact race
+    # the queue exists to avoid. drain is the one thing that knows better, so it
+    # corrects the record itself.
+    try:
+        rec = dict(status_records().get(sid) or {})
+        if rec:
+            rec.update(state="running", event="cx-drain", ts=int(time.time()))
+            path = os.path.join(STATUS_DIR, f"{sid}.json")
+            tmp = f"{path}.tmp.{os.getpid()}"
+            with open(tmp, "w") as fh:
+                json.dump(rec, fh)
+            os.replace(tmp, path)
+    except OSError:
+        pass  # a failed status update must not swallow the message
+
     body = "\n\n".join(f"Message from {m.get('from') or 'cx'}: {m.get('msg') or ''}"
                        for m in msgs)
     json.dump({
