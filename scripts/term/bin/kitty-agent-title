@@ -81,24 +81,30 @@ esac
 
 [ -n "$BRANCH" ] && LABEL="$LABEL/$BRANCH"
 
+# MARK is for the human reading the tab bar; STATE is the same fact in a form
+# `cx ls` can consume. Deliberately a small vocabulary — running / waiting / idle
+# is what matters when you have nine panes and can look at one.
 case "$EVENT" in
-  SessionStart) MARK="🌱" ;;
-  UserPromptSubmit | PostToolUse) MARK="💭" ;;
-  PreToolUse) MARK="⚙" ;;
-  PermissionRequest) MARK="❓" ;;
+  SessionStart) MARK="🌱" STATE="start" ;;
+  UserPromptSubmit | PostToolUse) MARK="💭" STATE="running" ;;
+  PreToolUse) MARK="⚙" STATE="running" ;;
+  PermissionRequest) MARK="❓" STATE="waiting" ;;
   # Notification carries the reason in .message; permission_prompt means the
   # agent is blocked on the user, idle_prompt means it is just sitting there.
   Notification)
     case "$(json_value message)" in
-      *ermission* | *pproval* | *licitation*) MARK="❓" ;;
-      *) MARK="🔔" ;;
+      *ermission* | *pproval* | *licitation*) MARK="❓" STATE="waiting" ;;
+      *) MARK="🔔" STATE="notify" ;;
     esac
     ;;
-  Stop | SubagentStop) MARK="✔" ;;
-  StopFailure) MARK="✖" ;;
-  SessionEnd) MARK="💤" ;;
-  PreCompact | PostCompact) MARK="🧹" ;;
-  *) MARK="" ;;
+  # SubagentStop means a subagent finished, not the session — the session itself
+  # is still working, so it must not be reported idle.
+  Stop) MARK="✔" STATE="idle" ;;
+  SubagentStop) MARK="✔" STATE="running" ;;
+  StopFailure) MARK="✖" STATE="failed" ;;
+  SessionEnd) MARK="💤" STATE="ended" ;;
+  PreCompact | PostCompact) MARK="🧹" STATE="compacting" ;;
+  *) MARK="" STATE="" ;;
 esac
 
 TITLE=$LABEL
@@ -108,7 +114,49 @@ TITLE=$LABEL
 # so the mapping can be checked without a live kitty window.
 if [ -n "${KITTY_AGENT_TITLE_DEBUG:-}" ]; then
   printf '%s\n' "$TITLE"
+  [ -n "${KITTY_AGENT_TITLE_DEBUG_STATE:-}" ] && printf 'state=%s\n' "$STATE"
   exit 0
+fi
+
+# Publish the same facts as a state record for `cx ls` to read. This is why the
+# hook exists twice over: scraping "esc to interrupt" off a pane's screen guesses
+# at what the hook payload states outright, and costs a kitten @ get-text per
+# pane. Keyed by session_id rather than kitty window id because a session running
+# under tmux (aoe-grid-*) has no window id to key on — the claude process is a
+# child of the tmux server, not of the pane.
+SESSION_ID=$(json_value session_id)
+if [ -n "$SESSION_ID" ]; then
+  case "$SESSION_ID" in
+    # A session id lands in a filename, so refuse anything that is not the
+    # uuid-shaped token it is supposed to be.
+    *[!0-9a-zA-Z-]* | "") ;;
+    *)
+      CX_DIR="${CX_STATE_DIR:-$HOME/.claude/cx}/state"
+      if mkdir -p "$CX_DIR" 2>/dev/null; then
+        CX_TMP="$CX_DIR/.$SESSION_ID.$$"
+        if jq -n \
+          --arg session_id "$SESSION_ID" \
+          --arg agent "$AGENT" \
+          --arg host "$(hostname -s 2>/dev/null || echo '?')" \
+          --arg win "${KITTY_WINDOW_ID:-}" \
+          --arg cwd "$CWD" \
+          --arg repo "$REPO" \
+          --arg branch "$BRANCH" \
+          --arg state "$STATE" \
+          --arg event "$EVENT" \
+          --arg transcript "$(json_value transcript_path)" \
+          --arg title "$TITLE" \
+          --argjson ts "$(date +%s)" \
+          '{$session_id, $agent, $host, $cwd, $repo, $branch, $state, $event,
+            $transcript, $title, $ts, win: (if $win == "" then null else ($win | tonumber) end)}' \
+          >"$CX_TMP" 2>/dev/null; then
+          mv -f "$CX_TMP" "$CX_DIR/$SESSION_ID.json" 2>/dev/null || rm -f "$CX_TMP" 2>/dev/null
+        else
+          rm -f "$CX_TMP" 2>/dev/null
+        fi
+      fi
+      ;;
+  esac
 fi
 
 SCOPE=${KITTY_AGENT_TITLE_SCOPE:-window}

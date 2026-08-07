@@ -18,10 +18,18 @@ cwd and a slot number. Registration is best-effort: panes with no registry
 file still show up in `cx ls`, discovered from kitty's process table, they
 just lack a session_id. Nothing here depends on the hook being installed.
 
-Status is read off the pane's own screen, since Claude Code's TUI is the
-only thing that knows whether it is thinking: "esc to interrupt" => running,
-a permission prompt => waiting (the state worth surfacing when you have nine
-panes and can only look at one).
+Status
+------
+Read from $CX_STATE_DIR/state/<session_id>.json, which
+scripts/term/bin/kitty-agent-title writes on every agent lifecycle hook. The
+hook is *told* the state (`hook_event_name`), so this is exact, and reading it
+is one directory read for the whole roster.
+
+Screen scraping ("esc to interrupt" => running, a permission prompt =>
+waiting) survives as a fallback for panes with no record: sessions started
+before the hooks were installed, or panes that are not agents at all. It is
+strictly worse — it infers from English UI strings that change between Claude
+Code versions, and costs a `kitten @ get-text` per pane.
 """
 
 from __future__ import annotations
@@ -37,6 +45,16 @@ import time
 STATE_DIR = os.path.expanduser(os.environ.get("CX_STATE_DIR", "~/.claude/cx"))
 PANES_DIR = os.path.join(STATE_DIR, "panes")
 MAIL_DIR = os.path.join(STATE_DIR, "mail")
+# One file per session, written by scripts/term/bin/kitty-agent-title on every
+# agent lifecycle hook. Authoritative status: the hook is *told* what the session
+# is doing, where screen scraping has to infer it.
+STATUS_DIR = os.path.join(STATE_DIR, "state")
+
+# A session that died between hooks (SIGKILL, closed pane, crashed host) leaves
+# its last record behind claiming to be running. Records older than this are
+# reported stale rather than trusted — long enough that a genuinely long tool call
+# is not mislabelled, short enough that a corpse does not look busy for hours.
+STALE_AFTER = 15 * 60
 
 # Claude Code's TUI footer while a turn is in flight. Matched case-insensitively
 # against the pane's visible screen.
@@ -124,6 +142,74 @@ def registry() -> dict[int, dict]:
     return out
 
 
+_STATUS_CACHE: dict | None = None
+
+
+def status_records() -> dict[str, dict]:
+    """session_id -> hook-published state record. One directory read, cached."""
+    global _STATUS_CACHE
+    if _STATUS_CACHE is not None:
+        return _STATUS_CACHE
+    out: dict[str, dict] = {}
+    try:
+        names = os.listdir(STATUS_DIR)
+    except OSError:
+        _STATUS_CACHE = out
+        return out
+    for fn in names:
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(STATUS_DIR, fn)) as fh:
+                rec = json.load(fh)
+            sid = rec["session_id"]
+        except (OSError, ValueError, KeyError):
+            continue  # a half-written record; the next hook will replace it
+        out[sid] = rec
+    _STATUS_CACHE = out
+    return out
+
+
+def status_by_win() -> dict[int, dict]:
+    """Same records keyed by kitty window id, newest wins.
+
+    A pane that has hosted several sessions accumulates a record each; only the
+    most recent one describes what is in the pane now.
+    """
+    out: dict[int, dict] = {}
+    for rec in status_records().values():
+        win = rec.get("win")
+        if win is None:
+            continue
+        if win not in out or rec.get("ts", 0) > out[win].get("ts", 0):
+            out[win] = rec
+    return out
+
+
+def human_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def record_status(rec: dict) -> tuple[str, str]:
+    """(status, which hook said so and how long ago) from a state record.
+
+    The second field is deliberately not the pane's last output line — that needs
+    the transcript, not the record. "PreToolUse 4s" at least says whether the
+    status is fresh or the session has been sitting on it.
+    """
+    state = rec.get("state") or "?"
+    age = time.time() - rec.get("ts", 0)
+    if state not in ("ended", "idle") and age > STALE_AFTER:
+        state = "stale"
+    return state, f"{rec.get('event') or '?'} {human_age(age)} ago"
+
+
 def write_record(rec: dict) -> None:
     os.makedirs(PANES_DIR, exist_ok=True)
     path = os.path.join(PANES_DIR, f"{rec['kitty_window_id']}.json")
@@ -192,15 +278,24 @@ def is_claude_pane(win: dict) -> bool:
 
 def roster(claude_only: bool = True) -> list[dict]:
     reg = registry()
+    st_by_win = status_by_win()
     rows: list[dict] = []
+    seen_sessions: set[str] = set()
     for os_win in kitty_tree():
         for tab in os_win["tabs"]:
             for win in tab["windows"]:
                 wid = win["id"]
                 rec = reg.get(wid)
+                st = st_by_win.get(wid)
                 pid = claude_pid_in_pane(win)
-                if claude_only and rec is None and pid is None:
+                # A state record is third proof that this pane holds an agent, and
+                # the only one that works when the process tree hides it (claude
+                # under a tmux server, as aoe-grid-* launches it).
+                if claude_only and rec is None and pid is None and st is None:
                     continue
+                session_id = (rec or {}).get("session_id") or (st or {}).get("session_id") or ""
+                if session_id:
+                    seen_sessions.add(session_id)
                 rows.append(
                     {
                         "win": wid,
@@ -209,14 +304,44 @@ def roster(claude_only: bool = True) -> list[dict]:
                         "tab_title": tab.get("title") or "",
                         "os_win": os_win["id"],
                         "title": win.get("title") or "",
-                        "cwd": rec.get("cwd") if rec else win.get("cwd") or "",
-                        "name": (rec or {}).get("name") or "",
+                        "cwd": (rec or {}).get("cwd") or (st or {}).get("cwd") or win.get("cwd") or "",
+                        # The record's repo beats the pane title as a fallback name:
+                        # kitty-agent-title stamps titles with state emoji, which
+                        # read badly in a NAME column and change every few seconds.
+                        "name": (rec or {}).get("name") or (st or {}).get("repo") or "",
                         "slot": (rec or {}).get("slot"),
-                        "session_id": (rec or {}).get("session_id") or "",
+                        "session_id": session_id,
                         "registered": rec is not None,
                         "self": bool(win.get("is_self")),
                     }
                 )
+
+    # Sessions with a live record but no pane of their own: running under tmux, or
+    # on another host once records are shared. Addressable for status even though
+    # `cx send` cannot type into them.
+    now = time.time()
+    for sid, st in status_records().items():
+        if sid in seen_sessions or st.get("state") == "ended":
+            continue
+        if now - st.get("ts", 0) > STALE_AFTER:
+            continue
+        rows.append(
+            {
+                "win": st.get("win") or 0,
+                "pid": None,
+                "tab": None,
+                "tab_title": "",
+                "os_win": None,
+                "title": st.get("title") or "",
+                "cwd": st.get("cwd") or "",
+                "name": st.get("repo") or "",
+                "slot": None,
+                "session_id": sid,
+                "registered": False,
+                "self": False,
+                "detached": True,
+            }
+        )
     # Stable ordering: registered slots first in slot order, then kitty order.
     rows.sort(key=lambda r: (r["slot"] is None, r["slot"] if r["slot"] is not None else r["win"]))
     # Backfill display slots for unregistered panes so every row is addressable.
@@ -258,8 +383,20 @@ def last_content_line(screen: str) -> str:
     return ""
 
 
-def status_of(win_id: int) -> tuple[str, str]:
-    """(status, last line of real content on the pane's screen)."""
+def status_of(win_id: int, session_id: str = "") -> tuple[str, str]:
+    """(status, one line of context) for a pane.
+
+    A hook-published record is preferred over screen scraping: it is exact rather
+    than inferred, and it costs a dict lookup instead of a `kitten @ get-text`
+    subprocess per pane. Scraping stays as the fallback for panes whose session
+    predates the hooks, or which are not agent sessions at all.
+    """
+    rec = status_records().get(session_id) if session_id else None
+    if rec is None:
+        rec = status_by_win().get(win_id)
+    if rec is not None:
+        return record_status(rec)
+
     screen = pane_screen(win_id)
     if not screen:
         return "?", ""
@@ -300,6 +437,22 @@ def resolve(who: str, rows: list[dict] | None = None) -> dict:
     return hits[0]
 
 
+def require_pane(dst: dict) -> dict:
+    """Refuse the pane-bound commands on a session that has no pane of its own.
+
+    Roster rows can come from a state record alone (claude under tmux, or another
+    host), which is enough to report status but gives kitty nothing to match on.
+    Failing here beats letting `kitten @ --match id:0` produce a confusing error.
+    """
+    if not dst.get("win"):
+        die(
+            f"slot {dst['slot']} ({dst.get('name') or dst.get('session_id') or '?'}) has no kitty pane "
+            "of its own — it is running under tmux or on another host, so it can be "
+            "listed but not typed into"
+        )
+    return dst
+
+
 def self_row(rows: list[dict] | None = None) -> dict | None:
     """The row for the pane this command is running in, via kitty's own --self."""
     rows = rows if rows is not None else roster()
@@ -337,15 +490,21 @@ def cmd_ls(argv: list[str]) -> int:
         return 0
     print(f"{'':2}{'SLOT':>4}  {'NAME':<22} {'WIN':>4} {'STATUS':<8} {'CWD':<24} LAST")
     for r in rows:
-        st, last = status_of(r["win"])
+        st, last = status_of(r["win"], r.get("session_id", ""))
         mark = "*" if me and r["win"] == me["win"] else " "
         cwd = r["cwd"].replace(os.path.expanduser("~"), "~")
         name = (r["name"] or r["title"] or "-") + ("" if r["registered"] else "~")
+        if r.get("detached"):
+            name += "@"
+        win = str(r["win"]) if r["win"] else "-"
         print(
-            f"{mark:2}{r['slot']:>4}  {trunc(name, 22):<22} {r['win']:>4} {st:<8} "
+            f"{mark:2}{r['slot']:>4}  {trunc(name, 22):<22} {win:>4} {st:<8} "
             f"{trunc(cwd, 24, left=True):<24} {trunc(last, 44)}"
         )
-    print("\n  * = this pane   ~ = unregistered (run cx-install-hooks so panes self-name)")
+    print(
+        "\n  * = this pane   ~ = unregistered (run cx-install-hooks so panes self-name)"
+        "   @ = no pane of its own (tmux/remote)"
+    )
     return 0
 
 
@@ -354,7 +513,7 @@ def cmd_send(argv: list[str]) -> int:
         die("usage: cx send <slot|name> <message...>")
     target, msg = argv[0], " ".join(argv[1:])
     rows = roster()
-    dst = resolve(target, rows)
+    dst = require_pane(resolve(target, rows))
     me = self_row(rows)
     if me and dst["win"] == me["win"]:
         die("refusing to send to this same pane")
@@ -410,7 +569,7 @@ def cmd_ask(argv: list[str]) -> int:
 
     target, question = argv[0], " ".join(argv[1:])
     rows = roster()
-    dst = resolve(target, rows)
+    dst = require_pane(resolve(target, rows))
     me = self_row(rows)
     if me and dst["win"] == me["win"]:
         die("refusing to ask this same pane")
@@ -525,7 +684,7 @@ def cmd_peek(argv: list[str]) -> int:
     extent = "all" if "--all" in argv else "screen"
     argv = [a for a in argv if a != "--all"]
     n = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 40
-    dst = resolve(argv[0])
+    dst = require_pane(resolve(argv[0]))
     txt = pane_screen(dst["win"], extent=extent)
     lines = [ln.rstrip() for ln in txt.splitlines()]
     while lines and not lines[-1]:
@@ -538,7 +697,7 @@ def cmd_peek(argv: list[str]) -> int:
 def cmd_focus(argv: list[str]) -> int:
     if not argv:
         die("usage: cx focus <slot|name>")
-    dst = resolve(argv[0])
+    dst = require_pane(resolve(argv[0]))
     kitty("focus-window", "--match", f"id:{dst['win']}")
     print(f"cx: focused slot {dst['slot']} (win {dst['win']})")
     return 0
