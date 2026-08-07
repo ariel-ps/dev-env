@@ -10,19 +10,33 @@ codex-danger() {
   codex --dangerously-bypass-approvals-and-sandbox "$@"
 }
 
-# __kitty_agent_grid <function-name> [count] — open a new kitty tab with
+# __kitty_agent_grid <function-name> [count] [label] — open a new kitty tab with
 # <count> windows (default 9, i.e. 3x3), each running the given shell
 # function via `zsh -lic` (so claude-danger/codex-danger resolve from rc),
 # then apply kitty's grid layout for equal-size panes.
+#
+# Panes are named <label>-1..<label>-N and titled with their number, matching
+# aoe-grid-claude-danger. <label> defaults to the current directory's name.
+#
+# usage: kitty-grid-claude-danger [count] [label]
+#   kitty-grid-claude-danger            # 9 panes, named <cwd-name>-1..9
+#   kitty-grid-claude-danger 4 bench    # 4 panes, named bench-1..bench-4
 #
 # DANGER: every pane runs an unsupervised agent with permission checks
 # bypassed (--dangerously-skip-permissions / --dangerously-bypass-approvals-
 # and-sandbox). N agents acting on the same cwd with no confirmation gate.
 # Requires kitty remote control (allow_remote_control in kitty.conf).
 __kitty_agent_grid() {
-  local cmd="$1" want="${2:-9}"
+  local cmd="$1" want="${2:-9}" label="${3:-}"
   [[ "$want" =~ '^[0-9]+$' ]] \
     || { echo "kitty-grid-${cmd}: count must be a number, got: $want" >&2; return 1; }
+
+  # Panes are identified as <label>-<i>, matching aoe-grid-claude-danger. Default
+  # to the cwd's name so a grid reads like the directory it works on.
+  label="${label:-${PWD:t}}"
+  label="${label//[^A-Za-z0-9._-]/-}"
+  [[ -n "$label" ]] \
+    || { echo "kitty-grid-${cmd}: could not derive a usable label; pass one explicitly" >&2; return 1; }
   command -v kitty >/dev/null 2>&1 \
     || { echo "kitty-grid-${cmd}: kitty not found" >&2; return 1; }
   kitty @ ls >/dev/null 2>&1 \
@@ -40,40 +54,34 @@ __kitty_agent_grid() {
   # shell never sources. The agent then starts fine (claude is in ~/.local/bin)
   # but every node-based hook inside it dies with "node: command not found",
   # silently disabling those plugins for the whole session.
+  # Each pane is told its own identity at launch, via two env vars the pane's
+  # agent hooks read back:
+  #   KITTY_AGENT_TITLE_PREFIX — kitty-agent-title puts it in front of the title,
+  #     so the pane number survives ("3 C dev-env ⚙"). Setting titles after launch
+  #     instead does not work: the agent's first lifecycle hook overwrites them.
+  #   CX_NAME — cx register names the session this instead of guessing from cwd,
+  #     which would name every pane of a grid identically and then tell them apart
+  #     by a collision counter that never matches the pane number.
+  # One identity per pane as a result: pane 3 is <label>-3, titled "3 ...".
   local first_id
-  first_id=$(kitty @ launch --type=tab --tab-title="$cmd" --cwd=current -- zsh -lic "$cmd") \
+  first_id=$(kitty @ launch --type=tab --tab-title="$label" --cwd=current \
+    --env "KITTY_AGENT_TITLE_PREFIX=1" --env "CX_NAME=${label}-1" \
+    -- zsh -lic "$cmd") \
     || { echo "kitty-grid-${cmd}: failed to launch tab" >&2; return 1; }
 
   local -i i
   for ((i = 2; i <= want; i++)); do
-    kitty @ launch --match "id:$first_id" --cwd=current -- zsh -lic "$cmd" >/dev/null
-  done
-
-  # number every pane 1..want (tab order) so agents are easy to tell apart —
-  # set after launch since the child process (zsh/claude/codex) controls the
-  # title by default and would otherwise clobber a title set at launch time.
-  local -a ids
-  ids=("${(@f)$(kitty @ ls --match-tab "window_id:$first_id" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-for w in data:
-    for t in w["tabs"]:
-        for win in t["windows"]:
-            print(win["id"])
-')}")
-  local -i n=1
-  local id
-  for id in "${ids[@]}"; do
-    kitty @ set-window-title --match "id:$id" "$n"
-    (( n++ ))
+    kitty @ launch --match "id:$first_id" --cwd=current \
+      --env "KITTY_AGENT_TITLE_PREFIX=$i" --env "CX_NAME=${label}-$i" \
+      -- zsh -lic "$cmd" >/dev/null
   done
 
   kitty @ goto-layout --match "window_id:$first_id" grid
-  echo "kitty-grid-${cmd}: ${want}x ${cmd}, numbered 1-${want}, new tab, grid layout"
+  echo "kitty-grid-${cmd}: ${want}x ${cmd}, named ${label}-1..${label}-${want}, new tab, grid layout"
 }
 
-kitty-grid-claude-danger() { __kitty_agent_grid claude-danger "${1:-9}"; }
-kitty-grid-codex-danger()  { __kitty_agent_grid codex-danger  "${1:-9}"; }
+kitty-grid-claude-danger() { __kitty_agent_grid claude-danger "${1:-9}" "${2:-}"; }
+kitty-grid-codex-danger()  { __kitty_agent_grid codex-danger  "${1:-9}" "${2:-}"; }
 
 # aoe-grid-claude-danger [count] [label] — open a new kitty tab with <count>
 # claude sessions (yolo/danger mode) created and tracked by aoe (tmux-backed),

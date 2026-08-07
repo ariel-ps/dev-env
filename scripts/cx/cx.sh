@@ -94,6 +94,11 @@ hooks = cfg.setdefault("hooks", {})
 wanted = {
     "SessionStart": f"{python} {helper} register 2>/dev/null; exit 0 # cx-hooks",
     "SessionEnd": f"{python} {helper} unregister 2>/dev/null; exit 0 # cx-hooks",
+    # No `exit 0` here, and no stderr swallowing of the payload: drain must be
+    # able to print its {"decision":"block"} JSON on stdout for Claude Code to
+    # act on it. It stays silent (and exits 0) whenever the inbox is empty, which
+    # is the common case.
+    "Stop": f"{python} {helper} drain 2>/dev/null # cx-hooks",
 }
 changed = []
 for event, command in wanted.items():

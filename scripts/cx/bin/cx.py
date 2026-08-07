@@ -45,6 +45,9 @@ import time
 STATE_DIR = os.path.expanduser(os.environ.get("CX_STATE_DIR", "~/.claude/cx"))
 PANES_DIR = os.path.join(STATE_DIR, "panes")
 MAIL_DIR = os.path.join(STATE_DIR, "mail")
+# Queued messages for sessions that were busy when someone sent to them, one
+# directory per session id. Drained by the Stop hook (`cx drain`).
+INBOX_DIR = os.path.join(STATE_DIR, "inbox")
 # One file per session, written by scripts/term/bin/kitty-agent-title on every
 # agent lifecycle hook. Authoritative status: the hook is *told* what the session
 # is doing, where screen scraping has to infer it.
@@ -120,6 +123,85 @@ def kitty_tree() -> list:
 def pane_screen(win_id: int, extent: str = "screen") -> str:
     txt = kitty("get-text", "--match", f"id:{win_id}", "--extent", extent, check=False)
     return ANSI.sub("", txt)
+
+
+def type_into(win_id: int, text: str) -> None:
+    """Paste text into a pane and submit it, as a user pressing Enter would.
+
+    Two things matter here, both learned the hard way:
+
+    --stdin, not `-- text`: with `--`, kitty interprets escapes in the argument,
+    so a message containing a Windows path or a literal \\n is silently mangled —
+    and an interpreted newline SUBMITS, splitting one message into several
+    prompts.
+
+    --bracketed-paste auto: wraps the text in paste markers when the receiving
+    program has bracketed paste on, so the TUI ingests it as one atomic paste
+    instead of a stream of keystrokes it might interleave with its own redraws.
+    `auto` rather than `enable` because a plain shell has paste mode off, and
+    sending the markers to it would leave literal escape junk on the line.
+    """
+    subprocess.run(
+        [kitty_bin(), "@", "send-text", "--match", f"id:{win_id}",
+         "--bracketed-paste", "auto", "--stdin"],
+        input=text, text=True, capture_output=True,
+    )
+    # Enter goes as its own write. The paste above is a single unit to the TUI,
+    # so no sleep is needed between them — the guessed delay this replaces was
+    # only ever compensating for keystroke-by-keystroke delivery.
+    kitty("send-text", "--match", f"id:{win_id}", "--", "\\r", check=False)
+
+
+# States in which the pane is NOT sitting at an empty prompt, so typing into it
+# would either be swallowed mid-turn or answer a dialog that expects a keypress.
+#
+# Only genuinely mid-turn states belong here. `start` and `notify` must NOT:
+# a session that has fired SessionStart (or an idle_prompt notification) and
+# nothing since is sitting at an empty prompt, ready to be typed into. Treating
+# those as busy deadlocks delivery — the message queues, and the queue only
+# drains on Stop, which never fires because no turn ever begins. Verified: a
+# fresh session held two messages indefinitely while showing an empty prompt.
+BUSY_STATES = ("running", "waiting", "compacting")
+
+
+def inbox_path(session_id: str) -> str:
+    return os.path.join(INBOX_DIR, session_id)
+
+
+def enqueue(session_id: str, sender: str, msg: str) -> str:
+    """Append a message to a session's inbox. Returns the file written."""
+    d = inbox_path(session_id)
+    os.makedirs(d, exist_ok=True)
+    # time_ns keeps arrival order without a counter, and pid keeps two senders in
+    # the same nanosecond from colliding.
+    path = os.path.join(d, f"{time.time_ns()}-{os.getpid()}.json")
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump({"from": sender, "msg": msg, "ts": time.time()}, fh)
+    os.replace(tmp, path)
+    return path
+
+
+def drain_inbox(session_id: str) -> list[dict]:
+    """Read and remove every queued message for a session, oldest first."""
+    d = inbox_path(session_id)
+    try:
+        names = sorted(fn for fn in os.listdir(d) if fn.endswith(".json"))
+    except OSError:
+        return []
+    out = []
+    for fn in names:
+        p = os.path.join(d, fn)
+        try:
+            with open(p) as fh:
+                out.append(json.load(fh))
+        except (OSError, ValueError):
+            pass
+        try:
+            os.remove(p)  # remove even on parse failure, else it blocks forever
+        except OSError:
+            pass
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -633,26 +715,84 @@ def cmd_ls(argv: list[str]) -> int:
 
 
 def cmd_send(argv: list[str]) -> int:
+    """Deliver a message to another session, typing it or queueing it.
+
+    Typing into a session that is mid-turn is the unreliable case: the TUI may
+    swallow the text, and if it is sitting on a permission dialog the keystrokes
+    answer the dialog instead. So a busy target gets the message queued, and its
+    Stop hook (`cx drain`) feeds it in as a real turn the moment it finishes.
+    """
+    force_queue = "--queue" in argv
+    argv = [a for a in argv if a != "--queue"]
     if len(argv) < 2:
-        die("usage: cx send <slot|name> <message...>")
+        die("usage: cx send <slot|name> <message...> [--queue]")
     target, msg = argv[0], " ".join(argv[1:])
     rows = roster()
-    dst = require_pane(resolve(target, rows))
+    dst = resolve(target, rows)
     me = self_row(rows)
-    if me and dst["win"] == me["win"]:
+    if me and dst["win"] and dst["win"] == me["win"]:
         die("refusing to send to this same pane")
     who = (me["name"] or f"slot{me['slot']}") if me else "cx"
     # No brackets in the prefix: if the target pane happens to be a bare shell
     # rather than a Claude TUI, `[cx ...]` is a zsh glob and the line dies with
     # "bad pattern" instead of showing up.
     text = f"cx/{who}: {msg}"
-    # Text and Enter go as separate writes: the TUI needs a beat to ingest a
-    # long line before the submit, otherwise the tail of the message lands
-    # after the newline and gets sent as a second prompt.
-    kitty("send-text", "--match", f"id:{dst['win']}", "--", text)
-    time.sleep(0.2)
-    kitty("send-text", "--match", f"id:{dst['win']}", "--", "\r")
-    print(f"cx: sent to slot {dst['slot']} ({dst['name'] or dst['title']}, win {dst['win']})")
+
+    sid = dst.get("session_id") or ""
+    state, _ = status_of(dst["win"], sid) if (dst["win"] or sid) else ("?", "")
+    label = f"slot {dst['slot']} ({dst['name'] or dst['title'] or sid[:8] or '?'})"
+
+    if state == "ended":
+        die(f"{label} has ended — nothing there to receive the message")
+
+    # Queue when asked, when the target is busy, or when it has no pane to type
+    # into at all. All three need a session id: without one there is no inbox to
+    # queue to and no Stop hook that would drain it.
+    if sid and (force_queue or state in BUSY_STATES or not dst["win"]):
+        enqueue(sid, who, msg)
+        pending = len(os.listdir(inbox_path(sid)))
+        why = "queued" if force_queue else (f"busy ({state})" if state in BUSY_STATES else "no pane")
+        print(f"cx: {label} {why} — queued, delivered on its next Stop "
+              f"({pending} pending)")
+        return 0
+
+    require_pane(dst)
+    type_into(dst["win"], text)
+    print(f"cx: typed into {label}, win {dst['win']}")
+    return 0
+
+
+def cmd_drain(argv: list[str]) -> int:
+    """Stop-hook entry point: feed this session's queued messages back to it.
+
+    Emitting {"decision":"block","reason":...} on Stop makes Claude Code treat the
+    reason as a new turn rather than ending, which is how a queued message becomes
+    a real prompt instead of keystrokes raced against a redraw.
+    """
+    payload = {}
+    if not sys.stdin.isatty():
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except ValueError:
+            payload = {}
+    sid = payload.get("session_id") or os.environ.get("CLAUDE_SESSION_ID") or ""
+    if not sid:
+        return 0  # not in a hook context; nothing to do and nothing to report
+
+    # A Stop hook that blocks re-enters the model, which fires Stop again when it
+    # next finishes. Draining (removing) the messages is what makes that
+    # terminate rather than loop on the same text forever.
+    msgs = drain_inbox(sid)
+    if not msgs:
+        return 0
+
+    body = "\n\n".join(f"Message from {m.get('from') or 'cx'}: {m.get('msg') or ''}"
+                       for m in msgs)
+    json.dump({
+        "decision": "block",
+        "reason": f"{body}\n\n(Delivered by cx while you were busy. "
+                  f"Treat it as a user message and respond to it.)",
+    }, sys.stdout)
     return 0
 
 
@@ -939,7 +1079,17 @@ def cmd_register(argv: list[str]) -> int:
         slot = next(i for i in range(1, 1000) if i not in used)
     name = rec.get("name")
     if not name:
-        base = re.sub(r"[^A-Za-z0-9_.-]+", "-", os.path.basename(cwd.rstrip("/")) or "session")
+        # A launcher that already knows what this pane is says so via CX_NAME
+        # (kitty-grid passes `--env CX_NAME=<label>-<i>`). Preferred over guessing
+        # from cwd, which names every pane of a grid launched in $HOME the same
+        # thing and then separates them by a collision counter — so the suffix
+        # ends up counting name clashes rather than panes, and never lines up with
+        # the pane number the grid actually shows.
+        base = os.environ.get("CX_NAME", "").strip()
+        if base:
+            base = re.sub(r"[^A-Za-z0-9_.-]+", "-", base)[:40]
+        else:
+            base = re.sub(r"[^A-Za-z0-9_.-]+", "-", os.path.basename(cwd.rstrip("/")) or "session")
         taken = {r.get("name") for w, r in reg.items() if w != wid_i}
         name, n = base, 2
         while name in taken:
@@ -1006,6 +1156,7 @@ COMMANDS = {
     "name": cmd_name, "rename": cmd_name,
     "me": cmd_me, "whoami": cmd_me,
     "register": cmd_register, "unregister": cmd_unregister,
+    "drain": cmd_drain,
     "gc": cmd_gc,
     "help": cmd_help, "-h": cmd_help, "--help": cmd_help,
 }
