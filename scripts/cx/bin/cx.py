@@ -198,6 +198,96 @@ POLICIES = ("down-siblings", "down-replies", "down", "open")
 RECIPROCAL_WINDOW = 90
 SENT_DIR = os.path.join(STATE_DIR, "sent")
 
+# The reciprocation check above only sees a two-node loop. A ring of three walks
+# straight through it: g.1 -> g.2 -> g.3 -> g.1 repeats forever, every hop legal,
+# because no pair ever sends straight back. Measured: nine consecutive hops allowed.
+#
+# So the causal PATH is carried instead. Delivering a message records, against the
+# receiving session, the chain of subjects that led to it. When that session sends,
+# it inherits the chain: a target already in the chain closes a cycle of any length
+# and is refused, and a chain longer than MAX_CHAIN is refused whatever its shape.
+#
+# This needs no cooperation from the model — cx writes the chain at delivery time,
+# so it cannot be dropped by a session that never mentions it. The chain expires
+# with CAUSE_TTL so an unrelated later conversation starts clean.
+MAX_CHAIN = 6
+CAUSE_TTL = 600
+CAUSE_DIR = os.path.join(STATE_DIR, "cause")
+
+
+def write_cause(session_id: str, chain: list[str]) -> None:
+    """Record the chain of subjects that caused session_id's next turn."""
+    if not session_id:
+        return
+    try:
+        os.makedirs(CAUSE_DIR, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9-]+", "-", session_id)[:80]
+        tmp = os.path.join(CAUSE_DIR, f".{safe}.{os.getpid()}")
+        with open(tmp, "w") as fh:
+            json.dump({"chain": chain[-MAX_CHAIN:], "ts": time.time()}, fh)
+        os.replace(tmp, os.path.join(CAUSE_DIR, safe))
+    except OSError:
+        pass
+
+
+def read_cause(session_id: str) -> list[str]:
+    """The chain that led to this session's current activity, if still fresh."""
+    if not session_id:
+        return []
+    safe = re.sub(r"[^A-Za-z0-9-]+", "-", session_id)[:80]
+    try:
+        with open(os.path.join(CAUSE_DIR, safe)) as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if time.time() - rec.get("ts", 0) > CAUSE_TTL:
+        return []
+    return [c for c in rec.get("chain", []) if isinstance(c, str)]
+
+
+def chain_id(row: dict) -> str:
+    """How a pane is identified inside a causal chain.
+
+    Its subject when it has one, otherwise its session id. The fallback matters:
+    the hierarchy deliberately exempts subject-less panes so an agent can reach the
+    operator, and without an identity here two such panes could ping-pong with no
+    check at all — verified before this existed.
+    """
+    subj = short_subject(row.get("subject") or "")
+    if subj:
+        return subj
+    sid = row.get("session_id") or ""
+    return f"sid:{sid[:8]}" if sid else ""
+
+
+def chain_check(chain: list[str], target: str) -> tuple[bool, str]:
+    """(allowed, reason) for extending a causal chain to `target`."""
+    if not target:
+        return True, ""
+    short = short_subject(target)
+    # `chain` ends with this session, so the pane that messaged it is chain[-2].
+    #
+    # Replying to whoever just messaged you is a conversation, not a ring, and
+    # blocking it broke the commonest flow there is: sending an agent a question and
+    # getting an answer. Two-node back-and-forth is governed by the reciprocation
+    # window and the rate cap instead; this check exists for the rings those cannot
+    # see, so it ignores the immediate sender and looks only further back.
+    if len(chain) >= 2 and short == short_subject(chain[-2]):
+        return True, "reply to the immediate sender"
+    if short in [short_subject(c) for c in chain[:-2]]:
+        return False, (
+            f"'{short}' is already in this message chain "
+            f"({' -> '.join(short_subject(c) for c in chain)} -> {short}) — that closes a "
+            f"loop, so it is refused whatever the ring size"
+        )
+    if len(chain) >= MAX_CHAIN:
+        return False, (
+            f"this message is {len(chain)} hops deep "
+            f"({' -> '.join(short_subject(c) for c in chain[:3])}...) — refusing to extend "
+            f"a chain past {MAX_CHAIN}"
+        )
+    return True, ""
+
 
 def record_send(sender: str, target: str) -> None:
     """Note that sender messaged target, for the reciprocation check."""
@@ -1184,9 +1274,22 @@ def cmd_send(argv: list[str]) -> int:
             if not allowed:
                 die(f"policy '{policy()}' forbids every target matching '{target}' "
                     f"({blocked[0][1]})")
+            my_sid = (me_row or {}).get("session_id") or ""
+            me_id = chain_id(me_row or {})
+            chain = read_cause(my_sid) + ([me_id] if me_id else [])
+            kept = []
             for r, _ in allowed:
+                cok, cwhy = chain_check(chain, chain_id(r))
+                if not cok:
+                    print(f"cx: skipped {short_subject(r.get('subject') or '')}: {cwhy}",
+                          file=sys.stderr)
+                    continue
                 record_send(me_subj, r.get("subject") or "")
-            hits = [r for r, _ in allowed]
+                write_cause(r.get("session_id") or "", chain)
+                kept.append(r)
+            if not kept:
+                die(f"every target matching '{target}' would close a message loop")
+            hits = kept
         # One rate check for the whole fan-out, then --force on each leg. Counting
         # each leg separately would spend a 9-pane grid's worth of allowance on a
         # single `cx send 'grid.*'`, so two of them would trip the runaway guard.
@@ -1234,7 +1337,17 @@ def cmd_send(argv: list[str]) -> int:
         if not ok:
             die(f"refusing to send to {label}: {why}. "
                 f"Use --force to override, or set CX_POLICY (see `cx policy`).")
+        # Cycle detection is independent of the hierarchy: it catches rings of any
+        # length, including between panes the policy would otherwise permit.
+        me_row = self_row(rows) or {}
+        my_sid = me_row.get("session_id") or ""
+        me_id, dst_id = chain_id(me_row), chain_id(dst)
+        chain = read_cause(my_sid) + ([me_id] if me_id else [])
+        ok, why = chain_check(chain, dst_id)
+        if not ok:
+            die(f"refusing to send to {label}: {why}. Use --force to override.")
         record_send(me_subj, dst_subj)
+        write_cause(sid, chain)
 
     if not force:
         ok, n = rate_check(who)
@@ -1939,7 +2052,8 @@ def cmd_gc(argv: list[str]) -> int:
     # Rate logs are self-pruning per send, but a sender that stops sending leaves
     # one behind forever. Reciprocation markers stop mattering once their window has
     # passed, so they go on the same sweep.
-    for d, keep in ((RATE_DIR, SEND_WINDOW * 4), (SENT_DIR, RECIPROCAL_WINDOW * 4)):
+    for d, keep in ((RATE_DIR, SEND_WINDOW * 4), (SENT_DIR, RECIPROCAL_WINDOW * 4),
+                    (CAUSE_DIR, CAUSE_TTL * 2)):
         try:
             for fn in os.listdir(d):
                 p = os.path.join(d, fn)
