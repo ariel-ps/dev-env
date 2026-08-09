@@ -164,14 +164,15 @@ input[type=search]{min-width:260px;flex:1 1 320px}
 .tablebox{flex:1 1 auto;min-height:0;overflow:auto;border:1px solid var(--border);
  border-radius:10px;background:var(--surface-1)}
 table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}
-th,td{padding:6px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
-th{position:sticky;top:0;z-index:2;background:var(--surface-1);cursor:pointer;
+th,td{padding:6px 12px;text-align:left;border-bottom:1px solid var(--border)}
+th{position:sticky;top:0;z-index:2;background:var(--surface-1);cursor:pointer;white-space:nowrap;
  font-weight:600;color:var(--text-secondary);border-bottom:1px solid var(--border-strong)}
 th:hover{color:var(--text-primary)}
 th .dir{color:var(--text-muted);font-size:10px}
-td{max-width:520px;overflow:hidden;text-overflow:ellipsis}
-td.num{text-align:right;font-variant-numeric:tabular-nums}
-td.idx,th.idx{position:sticky;left:0;background:var(--surface-1);
+/* long values wrap onto more lines instead of being cut off */
+td{vertical-align:top;max-width:60ch;white-space:pre-wrap;overflow-wrap:anywhere}
+td.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+td.idx,th.idx{position:sticky;left:0;background:var(--surface-1);white-space:nowrap;
  color:var(--text-muted);font-variant-numeric:tabular-nums}
 th.idx{z-index:3}
 tbody tr:hover td{background:var(--accent-soft)}
@@ -254,7 +255,20 @@ render();
 """
 
 
-def build_html(title, cols, types, numeric_cols, rows, embedded, truncated):
+SERVE_JS = """
+const live = document.getElementById('live');
+document.getElementById('reload').onclick = ()=>location.reload();
+setInterval(()=>{ if(live.checked) location.reload(); }, 5000);
+live.checked = new URLSearchParams(location.search).get('live') === '1';
+live.onchange = ()=>{
+  const u = new URL(location.href);
+  live.checked ? u.searchParams.set('live','1') : u.searchParams.delete('live');
+  history.replaceState(null,'',u);
+};
+"""
+
+
+def build_html(title, cols, types, numeric_cols, rows, embedded, truncated, served=False):
     payload = json.dumps({"rows": embedded, "numericCols": numeric_cols},
                          ensure_ascii=False).replace("<", "\\u003c")
     head = "".join(
@@ -262,6 +276,10 @@ def build_html(title, cols, types, numeric_cols, rows, embedded, truncated):
         f'{html.escape(c)} <span class="dir"></span></th>' for i, c in enumerate(cols))
     note = (f'<span class="note">first {len(embedded):,} of {len(rows):,} rows '
             f'(raise with --max-rows)</span>') if truncated else ""
+    controls = f"""
+  <span class="sub">read {datetime.now().strftime('%H:%M:%S')}</span>
+  <button id="reload">Reload file</button>
+  <label class="sub"><input type="checkbox" id="live"> auto every 5s</label>""" if served else ""
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -270,7 +288,7 @@ def build_html(title, cols, types, numeric_cols, rows, embedded, truncated):
 </head><body><div class="wrap">
 <header>
   <h1>{html.escape(title)}</h1>
-  <p class="sub">{len(rows):,} rows × {len(cols)} columns</p>
+  <p class="sub">{len(rows):,} rows × {len(cols)} columns</p>{controls}
   <button id="theme" style="margin-left:auto">Toggle theme</button>
 </header>
 <div class="toolbar">
@@ -290,8 +308,81 @@ def build_html(title, cols, types, numeric_cols, rows, embedded, truncated):
 </div>
 </div>
 <script type="application/json" id="data">{payload}</script>
-<script>{JS}</script>
+<script>{JS}{SERVE_JS if served else ""}</script>
 </body></html>"""
+
+
+def render(args, cached_rows=None, served=False):
+    """Parse the CSV (or reuse an already-parsed one) and return (name, html)."""
+    if cached_rows is None:
+        name, _, cols, rows = read_csv(args.csv, args.delimiter, args.encoding)
+    else:
+        name, cols, rows = cached_rows
+
+    types, numeric_cols = [], []
+    for i, c in enumerate(cols):
+        kind, is_num = column_type([r[i] for r in rows])
+        types.append(kind)
+        if is_num:
+            numeric_cols.append(i)
+
+    limit = len(rows) if args.max_rows in (0, None) else min(args.max_rows, len(rows))
+    doc = build_html(args.title or name, cols, types, numeric_cols, rows,
+                     rows[:limit], limit < len(rows), served=served)
+    return name, doc, cols, rows
+
+
+def serve(args):
+    """Serve the CSV on localhost, re-reading the file on every request."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    # stdin can only be read once — parse it up front and serve that snapshot.
+    cached = None
+    if args.csv == "-":
+        name, _, cols, rows = read_csv(args.csv, args.delimiter, args.encoding)
+        cached = (name, cols, rows)
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            if self.path.split("?")[0] not in ("/", "/index.html"):
+                self.send_error(404)
+                return
+            try:
+                _, doc, _, _ = render(args, cached_rows=cached, served=True)
+            except SystemExit as exc:  # unreadable/empty file — keep the server up
+                doc = f"<!DOCTYPE html><meta charset=utf-8><pre>{html.escape(str(exc))}</pre>"
+            body = doc.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *a):  # one line per request, not three
+            sys.stderr.write(f"csv_to_html: {self.address_string()} {fmt % a}\n")
+
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    except OSError as exc:
+        if args.port and exc.errno in (48, 98):  # address already in use
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        else:
+            raise SystemExit(f"csv_to_html: cannot bind port {args.port}: {exc}")
+
+    url = f"http://127.0.0.1:{httpd.server_port}/"
+    src = "stdin (snapshot)" if cached else os.path.abspath(args.csv)
+    print(f"csv_to_html: serving {src} at {url}  (ctrl-c to stop)", flush=True)
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\ncsv_to_html: stopped")
+    finally:
+        httpd.server_close()
 
 
 def main():
@@ -303,19 +394,20 @@ def main():
     ap.add_argument("--encoding", help="force input encoding")
     ap.add_argument("--max-rows", type=int, default=5000,
                     help="max rows embedded in the table (default 5000; 0 = all)")
+    ap.add_argument("-s", "--serve", action="store_true",
+                    help="serve on 127.0.0.1 instead of writing a file; "
+                         "the CSV is re-read on every request")
+    ap.add_argument("-p", "--port", type=int, default=8787,
+                    help="port for --serve (default 8787; 0 picks a free one)")
     ap.add_argument("--open", action="store_true", help="open the report in the browser")
+    ap.add_argument("--no-open", action="store_true", help="with --serve, do not open a browser")
     args = ap.parse_args()
 
-    name, delimiter, cols, rows = read_csv(args.csv, args.delimiter, args.encoding)
-    types, numeric_cols = [], []
-    for i, c in enumerate(cols):
-        kind, is_num = column_type([r[i] for r in rows])
-        types.append(kind)
-        if is_num:
-            numeric_cols.append(i)
+    if args.serve:
+        serve(args)
+        return
 
-    limit = len(rows) if args.max_rows in (0, None) else min(args.max_rows, len(rows))
-    embedded, truncated = rows[:limit], limit < len(rows)
+    name, doc, cols, rows = render(args)
 
     if args.output:
         out = args.output
@@ -324,7 +416,6 @@ def main():
     else:
         out = os.path.splitext(os.path.abspath(args.csv))[0] + ".html"
 
-    doc = build_html(args.title or name, cols, types, numeric_cols, rows, embedded, truncated)
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(doc)
 
