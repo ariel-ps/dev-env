@@ -40,10 +40,9 @@ argo_create_env() {
     -R prompt-security/ps-argocd-dev-envs \
     --ref main \
     -f ttl_hours="$ttl" \
+    -f group=default \
     -f instance_type=spot \
-    -f gpu=false \
     -f prompt_version="$prompt_version" \
-    -f icap=false \
     -f empty_env=false \
     -f additional_setup=false \
     -f shared_gpu=true \
@@ -136,4 +135,92 @@ argo_set() {
   git -C "$repo" commit --quiet -m "$branch: set image(s) to $tag [$*]"
   git -C "$repo" push --quiet origin "$branch" \
     && echo "[argo_set] pushed '$branch' — ArgoCD will sync"
+}
+
+# --- values.yaml snapshots ---------------------------------------------------
+# Save/restore named copies of a dev-env values.yaml. Snapshots live OUTSIDE the
+# git repo (argo_set hard-resets the repo, wiping in-tree copies) under
+# $PS_ARGOCD_SNAPSHOTS/<branch>/<name>.yaml (default ~/.cache/ps-argocd-snapshots).
+# A <name>.yaml.meta sidecar records the source branch, HEAD commit, and date.
+#
+# usage:
+#   argo_snapshot [name] [branch]           save values.yaml as <name>
+#   argo_snapshot_list [branch]             list saved snapshots (all branches if omitted)
+#   argo_snapshot_show <name> [branch]      print a snapshot to stdout
+#   argo_snapshot_restore <name> [branch]   copy a snapshot back over values.yaml
+#
+# branch defaults to the repo's current branch; name defaults to a date stamp.
+
+# Resolve the branch arg or fall back to the repo's checked-out branch.
+_argo_snap_branch() {
+  local repo="${PS_ARGOCD_REPO:-$HOME/.cache/ps-argocd-dev-envs}"
+  if [[ -n "$1" ]]; then
+    echo "$1"
+  else
+    git -C "$repo" symbolic-ref --short -q HEAD 2>/dev/null || echo ariel-ps
+  fi
+}
+
+argo_snapshot() {
+  emulate -L zsh
+  local repo="${PS_ARGOCD_REPO:-$HOME/.cache/ps-argocd-dev-envs}"
+  local snaps="${PS_ARGOCD_SNAPSHOTS:-$HOME/.cache/ps-argocd-snapshots}"
+  local branch; branch="$(_argo_snap_branch "$2")"
+  local name="${1:-$(date +%Y%m%d-%H%M%S)}"
+  local src="$repo/environments/$branch/values.yaml"
+  local dstdir="$snaps/$branch"
+  local dst="$dstdir/$name.yaml"
+
+  [[ -f "$src" ]] || { echo "argo_snapshot: not found: $src" >&2; return 1; }
+  mkdir -p "$dstdir" || return 1
+  [[ -f "$dst" ]] && echo "[argo_snapshot] overwriting existing '$name'"
+  cp "$src" "$dst" || return 1
+
+  local head; head="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)"
+  {
+    echo "branch: $branch"
+    echo "commit: ${head:-unknown}"
+    echo "saved:  $(date '+%Y-%m-%d %H:%M:%S %z')"
+    echo "source: $src"
+  } > "$dst.meta"
+
+  echo "[argo_snapshot] saved '$name' <- $branch (commit ${head:-unknown})"
+  echo "[argo_snapshot] $dst"
+}
+
+argo_snapshot_list() {
+  emulate -L zsh
+  local snaps="${PS_ARGOCD_SNAPSHOTS:-$HOME/.cache/ps-argocd-snapshots}"
+  local branch="$1"
+  local base="$snaps"
+  [[ -n "$branch" ]] && base="$snaps/$branch"
+  [[ -d "$base" ]] || { echo "[argo_snapshot_list] none under $base"; return 0; }
+  local f b n
+  for f in "$base"/**/*.yaml(.N); do
+    b="${f:h:t}"; n="${f:t:r}"
+    printf "%-14s %-24s %s\n" "$b" "$n" "$(grep -m1 '^commit:' "$f.meta" 2>/dev/null | awk '{print $2}')"
+  done
+}
+
+argo_snapshot_show() {
+  emulate -L zsh
+  local snaps="${PS_ARGOCD_SNAPSHOTS:-$HOME/.cache/ps-argocd-snapshots}"
+  local name="$1"; local branch; branch="$(_argo_snap_branch "$2")"
+  local f="$snaps/$branch/$name.yaml"
+  [[ -f "$f" ]] || { echo "argo_snapshot_show: not found: $f" >&2; return 1; }
+  cat "$f"
+}
+
+argo_snapshot_restore() {
+  emulate -L zsh
+  local repo="${PS_ARGOCD_REPO:-$HOME/.cache/ps-argocd-dev-envs}"
+  local snaps="${PS_ARGOCD_SNAPSHOTS:-$HOME/.cache/ps-argocd-snapshots}"
+  local name="$1"; local branch; branch="$(_argo_snap_branch "$2")"
+  [[ -n "$name" ]] || { echo "usage: argo_snapshot_restore <name> [branch]" >&2; return 1; }
+  local f="$snaps/$branch/$name.yaml"
+  local dst="$repo/environments/$branch/values.yaml"
+  [[ -f "$f" ]]   || { echo "argo_snapshot_restore: snapshot not found: $f" >&2; return 1; }
+  [[ -f "$dst" ]] || { echo "argo_snapshot_restore: target not found (bad branch?): $dst" >&2; return 1; }
+  cp "$f" "$dst" || return 1
+  echo "[argo_snapshot_restore] restored '$name' -> $dst (not committed; run argo_set/git to push)"
 }
