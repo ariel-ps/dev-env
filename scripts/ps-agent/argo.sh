@@ -5,7 +5,13 @@ argo_env_start() {
     echo "[argo_env_start] SSO session for '$profile' still valid"
   else
     echo "[argo_env_start] logging in to SSO for '$profile'..."
-    aws sso login --profile "$profile" || return 1
+    # awscli hands the URL to Python's webbrowser, which follows the macOS
+    # default browser (Edge here). Force Chrome via $BROWSER for this call only.
+    if [[ -d "/Applications/Google Chrome.app" ]]; then
+      BROWSER='/usr/bin/open -a "Google Chrome" %s' aws sso login --profile "$profile" || return 1
+    else
+      aws sso login --profile "$profile" || return 1
+    fi
   fi
   export AWS_PROFILE="$profile"
   echo "[argo_env_start] AWS_PROFILE=$AWS_PROFILE"
