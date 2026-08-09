@@ -230,3 +230,16 @@ argo_snapshot_restore() {
   cp "$f" "$dst" || return 1
   echo "[argo_snapshot_restore] restored '$name' -> $dst (not committed; run argo_set/git to push)"
 }
+
+# Extend the TTL of the running dev environment.
+# usage: argo_extend_env [hours=6]   (max 10h without approval, hard cap 120h)
+argo_extend_env() {
+  local hours="${1:-6}"
+  gh workflow run extend_env.yml \
+    -R prompt-security/ps-argocd-dev-envs \
+    --ref main \
+    -f env_type=prompt \
+    -f extend_hours="$hours" \
+    -f extend_additional_setup=false \
+    && echo "[argo_extend_env] dispatched (+${hours}h)"
+}
