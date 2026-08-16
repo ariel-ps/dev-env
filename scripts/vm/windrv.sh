@@ -12,8 +12,14 @@
 #   windrv unload           fltmc unload, leave installed
 #   windrv remove           unload + delete the driver package
 #   windrv sync             scp local sources to the VM, then deploy
+#   windrv pull             copy sources back from the VM into the repo
+#   windrv watch            sync+deploy on every save (needs fswatch)
 #   windrv log [seconds]    capture kernel DbgPrint output (default 10s)
 #   windrv sh [cmd...]      run a command in the VM (interactive shell if none)
+#
+# Building needs Visual Studio + WDK *in the VM* — mk.ps1 drives MSBuild there.
+# Editing on the Mac gets no IntelliSense (no WDK headers on macOS); use VS Code
+# Remote-SSH to `winvm` if you want the headers resolved.
 #
 # Notes:
 #   - Guest has no outbound internet by default; `vm_network_fix` sets up the
@@ -72,7 +78,7 @@ windrv() {
       local remote_dir="${dir//\\//}"
       scp -q "$src"/*.c "$src"/*.inf "$src"/*.vcxproj "$src"/mk.ps1 \
         "$target:$remote_dir/" || return 1
-      print "synced $src -> $host:$dir"
+      print -r -- "synced $src -> $host:$dir"
       ssh -o ConnectTimeout=10 "$target" "$ps_run deploy"
       ;;
 
@@ -91,6 +97,27 @@ windrv() {
       ssh -o ConnectTimeout=10 "$target" "powershell -NoProfile -Command \"$ps\""
       ;;
 
+    pull)
+      # VM -> repo, for when you edited in the VM (or over Remote-SSH)
+      [[ -d $src ]] || { print -u2 "windrv: no source dir: $src"; return 1 }
+      local remote_dir="${dir//\\//}"
+      scp -q "$target:$remote_dir/{*.c,*.inf,*.vcxproj,mk.ps1}" "$src/" 2>/dev/null \
+        || scp -q "$target:$remote_dir/hellofs.c" "$target:$remote_dir/hellofs.inf" \
+                  "$target:$remote_dir/hellofs.vcxproj" "$target:$remote_dir/mk.ps1" "$src/" || return 1
+      print -r -- "pulled $host:$dir -> $src"
+      git -C "$src" status --short -- . 2>/dev/null
+      ;;
+
+    watch)
+      (( $+commands[fswatch] )) || { print -u2 "windrv: needs fswatch (brew install fswatch)"; return 1 }
+      [[ -d $src ]] || { print -u2 "windrv: no source dir: $src"; return 1 }
+      print "watching $src — save a file to sync+deploy, Ctrl-C to stop"
+      fswatch -o -e '\.git' -e '/\.' "$src" | while read -r _; do
+        print "\n--- change detected $(date +%H:%M:%S) ---"
+        windrv sync
+      done
+      ;;
+
     sh)
       shift
       if (( $# )); then
@@ -101,7 +128,7 @@ windrv() {
       ;;
 
     -h|--help|help)
-      print "usage: windrv [build|deploy|status|unload|remove|sync|log [secs]|sh [cmd]]"
+      print "usage: windrv [build|deploy|status|unload|remove|sync|pull|watch|log [secs]|sh [cmd]]"
       ;;
 
     *)
