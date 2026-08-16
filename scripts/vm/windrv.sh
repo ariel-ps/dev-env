@@ -25,6 +25,24 @@
 #   WINDRV_DIR='C:\dev\hellofs'   WINDRV_NAME=hellofs
 #   WINDRV_SRC=~/Documents/projects/dev-notes/windows-kernel/minifilter-hello-world
 
+# Interactive elevated PowerShell on the Windows VM.
+# SSH sessions already run at High Mandatory Level (the key is in the guest's
+# administrators_authorized_keys), but sshd has no DefaultShell set, so a plain
+# `ssh` lands in cmd.exe. Appending `powershell` fixes that per-connection
+# without changing DefaultShell, which would break cmd-syntax one-liners.
+#
+#   winvm                   interactive elevated PowerShell prompt
+#   winvm <cmd...>          run one PowerShell command and exit
+winvm() {
+  emulate -L zsh
+  local target="${WINDRV_USER:-ariel}@${WINDRV_HOST:-192.168.64.3}"
+  if (( $# )); then
+    ssh -o ConnectTimeout=10 "$target" "powershell -NoProfile -Command $*"
+  else
+    ssh -t "$target" powershell
+  fi
+}
+
 windrv() {
   emulate -L zsh
   local host="${WINDRV_HOST:-192.168.64.3}"
